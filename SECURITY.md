@@ -36,4 +36,9 @@ We aim to acknowledge within three working days.
 
 ## Supported versions
 
-Nothing is tagged yet. Until a first release, only `main` is supported.
+The latest tag, and `main`. Nothing older.
+
+While this is `v0` a fix ships in the next tag rather than as a backport, so
+"upgrade" is the whole remediation story. If that is ever not good enough for
+something reported here, say so in the report and we will work out what a
+patch release would have to look like.

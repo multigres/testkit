@@ -19,7 +19,21 @@ receiver `assert` provides, so a test says `c.Eq(...)` and `c.Get(key, obj)`
 against one object. Importing `assert` alone is supported and costs you none of
 the harness.
 
-Nothing here is tagged yet. Pin a pseudo-version and expect the API to move.
+## Versioning
+
+`v0`, and expect it to stay there for a while. Under SemVer that means any
+release may break you, which is an honest description rather than a
+disclaimer: this is a young harness whose shape is still being decided by the
+suites using it.
+
+```
+go get github.com/multigres/testkit@latest
+go install github.com/multigres/testkit/tools/assertfix@latest
+```
+
+`tools/assertfix` is a separate module and carries its own tags, prefixed with
+its directory (`tools/assertfix/v0.1.0`). A root `v0.1.0` says nothing about
+it, which is the usual surprise with nested modules.
 
 ## Requirements
 

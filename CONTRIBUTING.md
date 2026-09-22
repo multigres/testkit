@@ -31,6 +31,10 @@ before a change to `ctrltest`, which is where the concurrency lives.
 not reach it. `make check-tools` lints, vets and tests it; `make check-all`
 runs both. CI runs both.
 
+It is also versioned separately, with tags prefixed by its directory
+(`tools/assertfix/v0.1.0`). Releasing the root module does not release the
+tool, and a change touching both needs both tags.
+
 ## What a change needs
 
 ### Tests
