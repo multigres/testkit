@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+
+version = "2"
+
+[linters]
+# Beyond the v2 defaults (errcheck, govet, ineffassign, staticcheck, unused).
+#
+# nolintlint is the load-bearing one. assert/ordered.go carries four
+# //nolint:staticcheck directives whose justification is that De Morgan does
+# not hold for NaN, and a directive that silently stops applying is how that
+# reasoning gets lost: the lint comes back, someone "simplifies" the
+# comparison, and all four assertions quietly start accepting NaN.
+enable = [ "errorlint", "gosec", "misspell", "nolintlint" ]
+
+[linters.settings.nolintlint]
+require-explanation = true
+require-specific = true
+
+[linters.exclusions]
+# Not a deferred migration, unlike the same exclusion in multigres-operator.
+# The recorder implements client.Client and client.SubResourceWriter in order
+# to attribute every write to a controller, and those interfaces still declare
+# Apply. An implementation cannot decline a method the interface requires, so
+# this exclusion is permanent for as long as controller-runtime ships it.
+rules = [
+  { linters = [ "staticcheck" ], text = "SA1019: client.Apply is deprecated" },
+]
+
+[formatters]
+enable = [ "gofumpt", "golines" ]

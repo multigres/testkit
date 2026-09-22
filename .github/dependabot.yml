@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+
+version: 2
+updates:
+  # Two gomod entries because tools/assertfix is its own module, deliberately:
+  # it needs golang.org/x/tools and nothing importing testkit/assert should
+  # inherit an analysis framework. A single "/" entry would never look at it.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(deps): "
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "gomod"
+    directory: "/tools/assertfix"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(deps): "
+    groups:
+      assertfix-modules:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(ci): "
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

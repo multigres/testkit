@@ -1,0 +1,17 @@
+# Go
+cover.out
+*cover.out
+cover.html
+coverage/
+
+# locally installed tooling (golangci-lint, setup-envtest, envtest binaries)
+bin/
+
+# the fixtool, if built in place rather than installed
+/tools/assertfix/assertfix
+
+# direnv
+.direnv/
+
+# macOS
+.DS_Store

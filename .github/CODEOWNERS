@@ -1,0 +1,6 @@
+# GitHub uses the last matching pattern for a file, so the catch-all rule must
+# come first and specific overrides must follow.
+#
+# Teams must have at least Read access to this repository.
+
+* @multigres/owners-operator

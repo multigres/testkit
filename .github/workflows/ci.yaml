@@ -1,0 +1,253 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# One workflow rather than multigres-operator's reusable-workflow layout. That
+# indirection is worth it there because five callers share the same jobs; here
+# the two triggers want an identical set, so a second file would only add a
+# hop between the trigger and the thing it runs.
+name: CI
+
+# No path filters on either trigger, and that is a decision rather than an
+# omission.
+#
+# On pull_request a paths-ignore is an outright trap: these job names are
+# required checks on main, and a required check that never runs is never
+# reported, so a docs-only pull request would sit on a pending check it has
+# no way to satisfy and could never merge.
+#
+# On push it is subtler and cost us a debugging session. A path filter needs
+# a changed-file list, which GitHub derives from the push's before and after
+# SHAs. Force-push over a rewritten root commit and there is no common
+# ancestor, so no diff, so no changed files, so nothing fails the filter and
+# the whole run is skipped in silence. That is precisely what happens while a
+# repo still has one commit and someone is amending it, which is the moment
+# you least want CI to be quietly off. The saving was a rounding error
+# either way.
+on:
+  pull_request:
+  push:
+    # Every branch, so a long-lived topic branch gets an answer before it
+    # becomes a pull request rather than at the end of the week it spent
+    # accumulating commits.
+    #
+    # '**' rather than omitting the filter: with neither branches nor tags,
+    # push fires on tag pushes too, and a release tag would re-run the whole
+    # suite over a commit that already passed it on the branch it came from.
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+# One run per ref at a time, and the newest wins.
+#
+# Running on every branch makes this necessary rather than tidy: the race job
+# alone is a 40 minute budget, and pushing three commits in quick succession
+# would otherwise start three full suites over commits nobody is waiting on.
+#
+# Keyed on ref rather than on SHA, so a superseded push is cancelled and a
+# rerun of the same ref is not queued behind itself. The pull_request event
+# gets its own group, since its ref is refs/pull/N/merge: a branch push and
+# the pull request opened from it do both run, which is the price of the
+# push trigger and is why the group is not wide enough to cancel across them.
+#
+# Never cancel on the default branch. main's run is the one that populates
+# the shared build cache and the one a bisect reads later, so a fast follow-up
+# push must not leave a hole in that history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ./go.mod
+          cache: false # manual cache control below
+
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-lint-${{ hashFiles('**/go.sum', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-go-lint-
+
+      - name: Lint
+        run: make lint
+
+      - name: Check license headers
+        run: make license-check
+
+      - name: Verify go.mod is tidy
+        run: make verify
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-lint-${{ hashFiles('**/go.sum', 'Makefile') }}
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ./go.mod
+          cache: false # manual cache control below
+
+      # envtest binaries land in ./bin and are keyed with the rest of the
+      # tooling, so a run that hits the cache does not re-download an API
+      # server, an etcd and a kubectl.
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-test-${{ hashFiles('**/go.sum', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-go-test-
+
+      - name: Test
+        run: make test
+
+      - name: Report coverage
+        run: go tool cover -func=cover.out | tail -1
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-test-${{ hashFiles('**/go.sum', 'Makefile') }}
+
+  test-race:
+    name: Test (race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ./go.mod
+          cache: false # manual cache control below
+
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-race-${{ hashFiles('**/go.sum', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-go-race-
+
+      - name: Test under the race detector
+        run: make test-race
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-race-${{ hashFiles('**/go.sum', 'Makefile') }}
+
+  # tools/assertfix is its own module, so the root ./... never reaches it and
+  # the jobs above would happily stay green through a tool that does not
+  # compile. It rewrites other people's test sources, which makes it the last
+  # thing in this repo that should go unchecked.
+  tools:
+    name: Tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ./go.mod
+          cache: false # manual cache control below
+
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-tools-${{ hashFiles('**/go.sum', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-go-tools-
+
+      - name: Lint, vet and test the tools module
+        run: make check-tools
+
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            bin
+          key: ${{ runner.os }}-go-tools-${{ hashFiles('**/go.sum', 'Makefile') }}
+
+  vulncheck:
+    name: Vulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ./go.mod
+
+      - name: govulncheck
+        run: make vulncheck

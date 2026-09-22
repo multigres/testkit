@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package stdlibcase // want `imports need the testkit/assert path`
+
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
+
+// One assertion in a scope gets no receiver declaration: naming a variable to
+// use it once costs two lines.
+func TestSingleAssertionIsInlined(t *testing.T) { // want `1 assertion can use testkit/assert`
+	got := "a"
+	assert.NewCollecting(t).Eq("b", got, "got")
+}
+
+// Several assertions share a receiver, inserted after the t.Parallel preamble
+// rather than at the top of the body.
+func TestSeveralAssertionsShareAReceiver(t *testing.T) { // want `3 assertion\(s\) can use testkit/assert`
+	t.Parallel()
+	c := assert.NewCollecting(t)
+
+	got, want := 1, 2
+	c.Eq(want, got, "got")
+	c.Len("abc", 3, "len")
+	c.Require().NoError(doThing(), "doThing")
+}
+
+// A scope mixing Errorf and Fatalf gets a collecting receiver, with Require()
+// on the aborting sites, so no test changes behaviour.
+func TestMixedModesKeepTheirAbortSemantics(t *testing.T) { // want `2 assertion\(s\) can use testkit/assert`
+	c := assert.NewCollecting(t)
+	c.Require().NoError(doThing(), "setup")
+	c.Eq(2, 1, "mismatch")
+}
+
+// A slice cannot be compared with Eq, which is generic over comparable, so
+// the type checker picks the diffing form instead. This is the decision a
+// regex cannot make, and the reason this tool is an analysis pass.
+func TestSliceComparisonBecomesADiff(t *testing.T) { // want `1 assertion can use testkit/assert`
+	got, want := []int{1}, []int{2}
+	assert.NewCollecting(t).EqDiff(want, got, "got")
+}
+
+// Whereas a comparable operand keeps ==, and a struct holding an unexported
+// field goes to EqDeep rather than EqDiff, because go-cmp panics where
+// reflect.DeepEqual reads it.
+func TestComparableAndUnexportedSplitApart(t *testing.T) { // want `2 assertion\(s\) can use testkit/assert`
+	c := assert.NewCollecting(t)
+	c.Eq(2, 1, "got")
+	got, want := hidden{1}, hidden{2}
+	c.EqDeep(want, got, "hidden: got")
+}
+
+type hidden struct{ n int }
+
+func doThing() error { return nil }
