@@ -193,3 +193,17 @@ func TestReceiverAvoidsAnUnusedParameter(t *testing.T) {
 	}
 	check(t, nil)
 }
+
+// Comments inside the replaced if survive the rewrite: a trailing directive
+// on the `if` line stays on the converted line it applies to, and one on its
+// own line inside the body moves above it.
+func TestCommentsInsideTheIfAreKept(t *testing.T) { // want `2 assertion\(s\) can use testkit/assert`
+	got := 1
+	if got != 2 { //nolint:staticcheck // kept on the converted line.
+		t.Errorf("got = %d", got)
+	}
+	if got != 3 {
+		// explains the check.
+		t.Errorf("got = %d", got) // trailing the call.
+	}
+}

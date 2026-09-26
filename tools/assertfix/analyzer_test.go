@@ -147,18 +147,26 @@ func TestMentionsMatchesWholeIdentifiersOnly(t *testing.T) {
 
 // The receiver name is `c` where it is free, and the first unused name
 // otherwise. Shadowing an existing `c` would compile in some scopes and not
-// others, which is the worst of both.
+// others, which is the worst of both. What feeds the used set — the body's
+// identifiers and, since the closure-parameter collision, the whole scope
+// chain — is pinned by the closurename testdata case, which runs the real
+// analyzer; this table covers the pure walk over candidates.
 func TestFreeNameAvoidsEveryIdentifierInScope(t *testing.T) {
 	for _, tc := range []struct {
-		body, want string
+		used []string
+		want string
 	}{
-		{`{ x := 1; _ = x }`, "c"},
-		{`{ c := 1; _ = c }`, "ck"},
-		{`{ c, ck := 1, 2; _, _ = c, ck }`, "chk"},
-		{`{ c, ck, chk, asrt, assertC := 1, 2, 3, 4, 5; _, _, _, _, _ = c, ck, chk, asrt, assertC }`, "assertC0"},
+		{[]string{"x"}, "c"},
+		{[]string{"c"}, "ck"},
+		{[]string{"c", "ck"}, "chk"},
+		{[]string{"c", "ck", "chk", "asrt", "assertC"}, "assertC0"},
 	} {
-		if got := freeName(&ast.FuncType{}, parseBlock(t, tc.body)); got != tc.want {
-			t.Errorf("freeName(%s) = %q, want %q", tc.body, got, tc.want)
+		used := map[string]bool{}
+		for _, name := range tc.used {
+			used[name] = true
+		}
+		if got := firstUnused(used); got != tc.want {
+			t.Errorf("firstUnused(%v) = %q, want %q", tc.used, got, tc.want)
 		}
 	}
 }
@@ -204,19 +212,6 @@ func TestIsStringLitRecognisesBothQuoteForms(t *testing.T) {
 			t.Errorf("isStringLit(%q) = %v, want %v", expr, got, want)
 		}
 	}
-}
-
-func parseBlock(t *testing.T, src string) *ast.BlockStmt {
-	t.Helper()
-	expr, err := parser.ParseExpr("func() " + src)
-	if err != nil {
-		t.Fatalf("parse %q: %v", src, err)
-	}
-	fn, ok := expr.(*ast.FuncLit)
-	if !ok {
-		t.Fatalf("parse %q: got %T", src, expr)
-	}
-	return fn.Body
 }
 
 // The golden files are compared as text, so a fix that emitted syntactically

@@ -381,7 +381,7 @@ func run(pass *analysis.Pass) (any, error) {
 			return false
 		})
 		if len(sc.sites) > 0 {
-			sc.recv = freeName(ft, body)
+			sc.recv = freeName(pass, body, ft)
 			scopes = append(scopes, sc)
 		}
 	}
@@ -543,12 +543,13 @@ func run(pass *analysis.Pass) (any, error) {
 			if s.hoist != "" {
 				edits = append(edits, hoistEdit(pass, s.node, s.hoist))
 			}
+			leading, trailing := keptComments(pass, s.node)
 			edits = append(edits, analysis.TextEdit{
 				Pos: s.node.Pos(),
 				End: s.node.End(),
-				NewText: []byte(
-					fmt.Sprintf("%s.%s(%s)", base, s.method, strings.Join(s.args, ", ")),
-				),
+				NewText: []byte(leading +
+					fmt.Sprintf("%s.%s(%s)", base, s.method, strings.Join(s.args, ", ")) +
+					trailing),
 			})
 		}
 
@@ -676,35 +677,83 @@ func isTestPreamble(st ast.Stmt, tName string) bool {
 	return strings.HasPrefix(sel.Sel.Name, "Skip")
 }
 
+// keptComments returns the comments inside node, rendered for the single
+// line that replaces it: those that started their own line go above it at
+// node's indentation, and the rest (trailing a line, or inside an
+// expression) go at its end.
+//
+// The replacement spans the whole if statement, so without this every
+// comment inside it is deleted. The one that matters most is a trailing
+// directive on the `if ... {` line: `//nolint:staticcheck` there suppresses
+// a finding on the condition, which the converted line still carries, so
+// dropping it turns a clean lint run into a failing one. Moving it to the
+// end of the new line keeps it on the line it applies to.
+func keptComments(pass *analysis.Pass, node ast.Node) (leading, trailing string) {
+	f := fileOf(pass, node.Pos())
+	if f == nil {
+		return "", ""
+	}
+	indent := strings.Repeat("\t", pass.Fset.Position(node.Pos()).Column-1)
+	for _, cg := range f.Comments {
+		if cg.End() <= node.Pos() || cg.Pos() >= node.End() {
+			continue
+		}
+		for _, c := range cg.List {
+			if c.Pos() <= node.Pos() || c.End() > node.End() {
+				continue
+			}
+			if startsOwnLine(pass, c.Pos()) {
+				leading += c.Text + "\n" + indent
+			} else {
+				trailing += " " + c.Text
+			}
+		}
+	}
+	return leading, trailing
+}
+
 // freeName picks a receiver name not already used in this scope.
 //
 // `c` is the name worth having and plenty of tests already use it for a
 // config, a client or a channel. Shadowing one produces code that compiles
 // in some scopes and not others, so take the first name nobody has claimed.
 //
-// The signature counts as well as the body: a parameter or named result the
-// body never mentions is still declared in the same scope, so `c :=` at the
-// top of `func(t *testing.T, c *Client)` does not compile. Any name the body
-// does mention, including one from an enclosing scope, is an Ident in the
-// body and is caught by the body walk, so shadowing one is never silent.
-func freeName(ft *ast.FuncType, body *ast.BlockStmt) string {
+// "This scope" is the function's own scope and every scope enclosing it, not
+// just the identifiers its body mentions. The body walk alone missed a
+// parameter the body never references (`func(t *testing.T, c *Client)`),
+// which still owns its name, so `c :=` failed to compile. go/types records a
+// function's scope, parameters included, on its *ast.FuncType rather than on
+// the body block, and its parents run out through enclosing functions, the
+// file's imports and the package. Walking the chain also avoids names that
+// are only visible, not used, which is stricter than correctness needs (any
+// name the body does use is already an identifier in the body) but keeps a
+// closure from reading as though it redeclares an outer variable. The one
+// outer name it cannot see is a receiver this tool inserts into an enclosing
+// function, since that is not in the type-checked source; shadowing it is
+// harmless, because every receiver's sites sit inside its own function.
+// The body walk stays for the opposite direction: a `c` declared in a block
+// nested inside the body lives in a child scope the chain never reaches, and
+// the receiver declared above it would be shadowed there.
+func freeName(pass *analysis.Pass, body *ast.BlockStmt, ft *ast.FuncType) string {
 	used := map[string]bool{}
-	for _, fl := range []*ast.FieldList{ft.Params, ft.Results} {
-		if fl == nil {
-			continue
-		}
-		for _, f := range fl.List {
-			for _, id := range f.Names {
-				used[id.Name] = true
-			}
-		}
-	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		if id, ok := n.(*ast.Ident); ok {
 			used[id.Name] = true
 		}
 		return true
 	})
+	for sc := pass.TypesInfo.Scopes[ft]; sc != nil; sc = sc.Parent() {
+		for _, n := range sc.Names() {
+			used[n] = true
+		}
+	}
+	return firstUnused(used)
+}
+
+// firstUnused takes the first candidate name the used set does not hold.
+// The set, and therefore the interesting part, is freeName's; this half is
+// pure so it stays unit-testable without a type-checked package.
+func firstUnused(used map[string]bool) string {
 	for _, n := range []string{"c", "ck", "chk", "asrt", "assertC"} {
 		if !used[n] {
 			return n
