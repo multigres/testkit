@@ -35,6 +35,10 @@ go install github.com/multigres/testkit/tools/assertfix@latest
 its directory (`tools/assertfix/v0.1.0`). A root `v0.1.0` says nothing about
 it, which is the usual surprise with nested modules.
 
+Code `assertfix` converts using `ErrorWhen`, `EqDiffOpts` or `EventuallyTrue`
+needs `testkit` at whichever release first adds them (`v0.2.0` and later),
+not just any `v0`: pin the root module to that version alongside the tool.
+
 ## Requirements
 
 **Go 1.27.** `assert`'s comparisons are generic *methods*, which the language
@@ -58,10 +62,32 @@ fetches them into `./bin`; `make test` does it for you.
 
 Equality, errors, nil, length and emptiness, containment over slices and
 strings, ordered comparisons, zero values, pointer identity, unordered slice
-equality, panics, file and directory existence, and polling with `Eventually`.
-The set was chosen by counting what the test suites in these projects actually
-call, so it is sized to real use rather than to completeness. That is also the
-bar for adding to it: show the call sites.
+equality, panics, file and directory existence, and polling with `Eventually`
+or, on a receiver whose collecting-versus-aborting mode should decide how a
+timeout fails, `EventuallyTrue`. The set was chosen by counting what the test
+suites in these projects actually call, so it is sized to real use rather than
+to completeness. That is also the bar for adding to it: show the call sites.
+
+Three additions came out of running `assertfix` over `multigres-operator`,
+each closing a decline the tool found rather than one guessed at:
+
+- **`ErrorWhen(wantErr bool, err error, ...)`** for the
+  `if (err != nil) != wantErr` shape a table test writes when one row wants
+  an error and the next does not (26 sites). A bare `Eq(wantErr, err != nil)`
+  compiles and asserts the same thing, but its failure message cannot say
+  which direction went wrong; this one can.
+- **`EqDiffOpts`** is `EqDiff` with a `[]cmp.Option`, for a comparison that
+  needs to ignore a field or supply its own comparator (13 sites). Taken as
+  its own slice parameter rather than folded into `EqDiff`'s variadic
+  `msgAndArgs`, since a `cmp.Option` satisfies `any` exactly as well as a
+  format string does.
+- **`EventuallyTrue(timeout, tick time.Duration, cond func() bool, ...)`**
+  maps from testify's `assert.Eventually`/`require.Eventually` (18 sites),
+  which take an explicit tick and a bool predicate where `Eventually` takes a
+  fixed poll interval and a `func() error`. Unlike `Eventually`, it fails
+  through the receiver's own mode: collecting continues, aborting aborts.
+  `Eventually` itself is unchanged, including that it always aborts even on
+  a collecting receiver.
 
 Two omissions are deliberate rather than pending:
 

@@ -5,6 +5,8 @@
 // continues, which is the whole difference assertfix has to preserve.
 package require
 
+import "time"
+
 type TestingT interface {
 	Errorf(format string, args ...any)
 }
@@ -27,6 +29,11 @@ func FileExists(t TestingT, path string, msgAndArgs ...any) bool        { return
 func NoFileExists(t TestingT, path string, msgAndArgs ...any) bool      { return true }
 func DirExists(t TestingT, path string, msgAndArgs ...any) bool         { return true }
 func NoDirExists(t TestingT, path string, msgAndArgs ...any) bool       { return true }
+func Eventually(
+	t TestingT, condition func() bool, waitFor, tick time.Duration, msgAndArgs ...any,
+) bool {
+	return true
+}
 
 // Declined by assertfix, and here so a test can prove a file holding one is
 // left entirely alone.

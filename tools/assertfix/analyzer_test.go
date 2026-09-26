@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,8 +24,18 @@ import (
 // testify stubs under testdata/src are there because analysistest resolves
 // imports out of that tree as a GOPATH.
 func TestConversions(t *testing.T) {
-	analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), Analyzer,
-		"stdlibcase", "testifycase")
+	analysistest.RunWithSuggestedFixes(
+		t,
+		analysistest.TestData(),
+		Analyzer,
+		"stdlibcase",
+		"testifycase",
+		"initcase",
+		"cmpdiffcase",
+		"errwhencase",
+		"cmpdiffupgrade",
+		"objequalimport",
+	)
 }
 
 // The refusals, which are the half of this tool that carries the risk. A
@@ -35,11 +46,82 @@ func TestRefusals(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), Analyzer, "refusals")
 }
 
+// TestRefusalsDoNotAccidentallyImportTestify guards m3 (review-3): every
+// refusal in this package except objequal_declined_call_test.go, which
+// deliberately keeps one testify call to prove it declines, has to actually
+// be exercised by TestRefusals above. Conversion is all-or-nothing per
+// file, so a stray testify import anywhere else in the package silently
+// blocks the whole file's worth of refusals from ever being checked at
+// all: that is exactly what refusals_test.go's own EqualValues test did to
+// a dozen others sharing its file, undetected, until this test existed.
+func TestRefusalsDoNotAccidentallyImportTestify(t *testing.T) {
+	blockedFiles := map[string]bool{
+		// Each deliberately keeps a testify call this tool declines, only
+		// partly embeds, or embeds and then still declines, to prove that
+		// shape stays declined; every other refusal in this package needs
+		// to reach the checks it claims to test, which a testify import
+		// anywhere else would block.
+		"objequal_declined_call_test.go":    true,
+		"objequal_unreachable_test.go":      true,
+		"objequal_declined_message_test.go": true,
+	}
+	files, err := filepath.Glob(
+		filepath.Join(analysistest.TestData(), "src", "refusals", "*_test.go"),
+	)
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no refusal files found; the refusals package is not testing anything")
+	}
+	for _, f := range files {
+		if blockedFiles[filepath.Base(f)] {
+			continue
+		}
+		src, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		for _, imp := range src.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(path, "stretchr/testify") {
+				t.Errorf(
+					"%s imports testify, which blocks every refusal in this file from being checked at all",
+					f,
+				)
+			}
+		}
+	}
+}
+
 // A file holding one testify call this tool declines keeps testify and is
 // left entirely alone, including its stdlib assertions: both packages want
 // the identifier `assert` and only one can have it.
 func TestTestifyConversionIsAllOrNothingPerFile(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), Analyzer, "blockedfile")
+}
+
+// TestObjEqPassStateIsClearedAfterEachRun guards the NIT this round took:
+// without clearObjEqPass running at the end of run(), objEqReplaced and
+// objEqPending each keep one entry per pass for the life of the process,
+// retaining that pass's whole TypesInfo and AST with it. Harmless under
+// unitchecker (one package per process), a real leak under analysistest,
+// multichecker or gopls. testifycase is the package to check this against:
+// it has to actually populate objEqReplaced (a package with no
+// ObjectsAreEqual call never creates an entry to begin with, leftover or
+// not, and would pass whether or not the clear ran).
+func TestObjEqPassStateIsClearedAfterEachRun(t *testing.T) {
+	analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), Analyzer, "testifycase")
+	if replaced, pending := objEqPassCount(); replaced != 0 || pending != 0 {
+		t.Errorf(
+			"objEqReplaced has %d leftover pass(es), objEqPending has %d, want 0 and 0",
+			replaced,
+			pending,
+		)
+	}
 }
 
 func TestMentionsMatchesWholeIdentifiersOnly(t *testing.T) {

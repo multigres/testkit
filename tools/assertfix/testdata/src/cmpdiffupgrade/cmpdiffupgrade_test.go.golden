@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package cmpdiffupgrade
+
+import (
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+
+	"github.com/multigres/testkit/assert"
+)
+
+type thing struct{ N int }
+
+// The shape a v0.1.0 run left behind: Eq("", cmp.Diff(...)) upgrades to
+// EqDiff on a later run, wherever it sits on the receiver.
+func TestUpgradeBareReceiver(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a, b := thing{1}, thing{2}
+	c.EqDiff(a, b, "mismatch") // want `Eq\("", cmp\.Diff\(\.\.\.\)\) can become EqDiff`
+}
+
+func TestUpgradeThroughRequire(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a, b := thing{1}, thing{2}
+	c.Require().EqDiff(a, b, "mismatch") // want `Eq\("", cmp\.Diff\(\.\.\.\)\) can become EqDiff`
+}
+
+func TestUpgradeBareConstructor(t *testing.T) {
+	a, b := thing{1}, thing{2}
+	assert.NewAborting(t).EqDiff(a, b, "mismatch") // want `Eq\("", cmp\.Diff\(\.\.\.\)\) can become EqDiff`
+}
+
+// Mismatched types keep the old mapping in place: EqDiff infers one type
+// parameter for both want and got, which does not compile when cmp.Diff's
+// own arguments differ (any against a concrete type, say), and cmp.Diff
+// itself never needed them to agree.
+func TestUpgradeDeclinesOnMismatchedTypes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var got any = "x"
+	want := "y"
+	c.Eq("", cmp.Diff(want, got), "mismatch (-want +got):")
+}
+
+// Eq on an unrelated type with the same method shape is left alone: the
+// resolution goes through the method's declaring package, not its name.
+type notOurs struct{}
+
+func (notOurs) Eq(want, got string, msgAndArgs ...any) {}
+
+func TestUpgradeDeclinesOnAnUnrelatedEqMethod(t *testing.T) {
+	var n notOurs
+	a, b := thing{1}, thing{2}
+	n.Eq("", cmp.Diff(a, b), "mismatch (-want +got):")
+}

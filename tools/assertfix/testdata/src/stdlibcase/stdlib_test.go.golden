@@ -53,6 +53,88 @@ func TestComparableAndUnexportedSplitApart(t *testing.T) { // want `2 assertion\
 	c.EqDeep(want, got, "hidden: got")
 }
 
+// ErrorWhen replaces the generic Eq mapping the tool would otherwise pick
+// for (err != nil) != wantErr: a bare boolean comparison can't say which
+// direction the mismatch went, and ErrorWhen's own message can.
+func TestErrorWhenReplacesTheBooleanComparison(t *testing.T) { // want `1 assertion can use testkit/assert`
+	wantErr := false
+	err := doThing()
+	assert.NewCollecting(t).ErrorWhen(wantErr, err, "doThing() error")
+}
+
+// A concrete error type keeps the generic boolean comparison instead of
+// ErrorWhen: getFieldErr returns *fieldErr, not error, and a nil check on
+// that concrete pointer is not the same claim as a nil check on the error
+// interface ErrorWhen takes. Storing a nil *fieldErr into an error would
+// make err != nil true, the opposite of what the concrete comparison here
+// says; the fallback keeps the original expression exactly as written, so
+// no such boxing ever happens.
+func TestErrorWhenDeclinesOverAConcreteErrorType(t *testing.T) { // want `1 assertion can use testkit/assert`
+	wantErr := false
+	err := getFieldErr(wantErr)
+	assert.NewCollecting(t).Eq(wantErr, (err != nil), "getFieldErr() error = %v, wantErr", err)
+}
+
+// The == spelling falls back the same way.
+func TestErrorWhenDeclinesOverAConcreteErrorTypeEQL(t *testing.T) { // want `1 assertion can use testkit/assert`
+	wantErr := false
+	err := getFieldErr(wantErr)
+	assert.NewCollecting(t).NotEq(wantErr, (err == nil), "mismatch")
+}
+
+// The same hole existed for NoError/Error before this fix: a concrete
+// *fieldErr falls back to Nil/NotNil, which read through to the pointer's
+// own nilness with no interface in between, rather than NoError, which
+// would ask the interface's nilness instead.
+func TestNoErrorDeclinesOverAConcreteErrorType(t *testing.T) { // want `1 assertion can use testkit/assert`
+	err := getFieldErr(false)
+	assert.NewCollecting(t).Nil(err, "unexpected error")
+}
+
+// A leading t.Skip is often unconditional, left in for a future PR to lift,
+// so the receiver goes after it rather than above: declaring it above an
+// unconditional Skip left it never reached, and staticcheck's SA4006
+// reported it as never used.
+func TestReceiverGoesAfterALeadingSkip(t *testing.T) { // want `2 assertion\(s\) can use testkit/assert`
+	t.Skip("not yet supported")
+	c := assert.NewCollecting(t)
+
+	got, want := 1, 2
+	c.Eq(want, got, "got")
+	c.Len("abc", 3, "len")
+}
+
+// Two interface values compared for != is identity, not value equality, so
+// comparableOperands refuses it (an interface can hold an incomparable
+// dynamic type and panic at runtime), and there is no more specific
+// assertion for identity either. The whole condition still becomes the
+// generic boolean fallback rather than being left alone.
+func TestInterfaceIdentityComparisonBecomesTheBooleanFallback(t *testing.T) { // want `1 assertion can use testkit/assert`
+	var a, b transport
+	assert.NewCollecting(t).False(a != b, "mismatch")
+}
+
+type transport interface{ RoundTrip() }
+
+// t.Fatal has no format string, so err would otherwise print twice: once
+// through NoError's own message, once again as this bare, redundant
+// trailing argument. dropRedundant removes it.
+func TestFatalDropsAnArgumentAlreadyInTheAssertion(t *testing.T) { // want `1 assertion can use testkit/assert`
+	err := doThing()
+	assert.NewAborting(t).NoError(err)
+}
+
 type hidden struct{ n int }
+
+type fieldErr struct{ msg string }
+
+func (e *fieldErr) Error() string { return e.msg }
+
+func getFieldErr(fail bool) *fieldErr {
+	if fail {
+		return &fieldErr{msg: "boom"}
+	}
+	return nil
+}
 
 func doThing() error { return nil }

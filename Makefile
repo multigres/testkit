@@ -66,7 +66,7 @@ test: setup-envtest ## Run all tests
 # concurrent reconciles through the interceptor are exercised, so the race
 # detector has real work to do here and the slow tail is fatter.
 .PHONY: test-race
-test-race: setup-envtest ## Run all tests under the race detector
+test-race: setup-envtest test-race-tools ## Run all tests under the race detector, including the tools module
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
 		go test -race -v -p 1 -timeout 30m ./...
 
@@ -102,6 +102,10 @@ vet-tools: ## Run go vet against the tools module
 .PHONY: test-tools
 test-tools: ## Run the tools module's tests
 	cd $(TOOLS_DIR) && go test ./...
+
+.PHONY: test-race-tools
+test-race-tools: ## Run the tools module's tests under the race detector
+	cd $(TOOLS_DIR) && go test -race ./...
 
 .PHONY: lint-tools
 lint-tools: golangci-lint ## Run golangci-lint against the tools module

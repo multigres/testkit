@@ -9,6 +9,8 @@
 // graph of the thing that exists to remove it.
 package assert
 
+import "time"
+
 type TestingT interface {
 	Errorf(format string, args ...any)
 }
@@ -31,6 +33,15 @@ func FileExists(t TestingT, path string, msgAndArgs ...any) bool        { return
 func NoFileExists(t TestingT, path string, msgAndArgs ...any) bool      { return true }
 func DirExists(t TestingT, path string, msgAndArgs ...any) bool         { return true }
 func NoDirExists(t TestingT, path string, msgAndArgs ...any) bool       { return true }
+func Eventually(
+	t TestingT, condition func() bool, waitFor, tick time.Duration, msgAndArgs ...any,
+) bool {
+	return true
+}
+
+// ObjectsAreEqual is a bool helper, not an assertion: it takes no TestingT,
+// which is exactly why assertfix needs a separate pass to find it.
+func ObjectsAreEqual(expected, actual any) bool { return true }
 
 // Declined by assertfix, and here so a test can prove a file holding one is
 // left entirely alone.

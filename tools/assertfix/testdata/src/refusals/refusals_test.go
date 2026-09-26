@@ -6,7 +6,10 @@
 // no `want` comments in this file: the assertion is that nothing is reported.
 package refusals
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 type node struct {
 	Name string
@@ -47,11 +50,34 @@ func TestMultiStatementBodyIsSkipped(t *testing.T) {
 	}
 }
 
-// Inlining the init would evaluate f() twice, because the message names the
-// variable as a value rather than as prose.
-func TestInitIsNotInlinedWhenTheMessageUsesIt(t *testing.T) {
+// Inlining the init would evaluate f() twice, because the message wraps err
+// for context rather than naming it as prose, and hoisting is not the
+// fallback here either: err is declared again later in the same block, so
+// hoisting the first one would collide with the second.
+func TestInitIsNotInlinedOrHoistedWhenBothAreUnsafe(t *testing.T) {
 	if err := f(); err != nil {
-		t.Fatal(err)
+		t.Fatal(fmt.Errorf("lookup: %w", err))
+	}
+	err := g()
+	_ = err
+}
+
+// Hoisting would shadow an outer err, changing what every reference to it
+// after this point means.
+func TestInitIsNotHoistedOverAnEnclosingDeclaration(t *testing.T) {
+	err := g()
+	if err := f(); err != nil {
+		t.Fatal(fmt.Errorf("lookup: %w", err))
+	}
+	_ = err
+}
+
+// A compound condition combined with an init is out of scope even though
+// each half is handled alone: compound conditions convert whole elsewhere in
+// this tool, but not in combination with hoisting or inlining an init.
+func TestCompoundConditionWithInitIsNotHoisted(t *testing.T) {
+	if exists, err := lookup(); err != nil || exists {
+		t.Errorf("mismatch")
 	}
 }
 
@@ -63,4 +89,44 @@ func TestBareFailureIsNotAnAssertion(t *testing.T) {
 	}
 }
 
-func f() error { return nil }
+// ObjectsAreEqual is always safe to become reflect.DeepEqual (verified
+// against testify's own source; see the assertfix README), but only where
+// something converts the call it sits inside, embedding the substitution as
+// part of that call's own rewrite. The declined-call shape that shares this
+// package but not this file, `EqualValues(t, ObjectsAreEqual(x, y), true)`,
+// lives in objequal_declined_call_test.go: it is the one testify import in
+// this package, and conversion is all-or-nothing per file.
+
+// Hoisting makes v a real, always-in-scope variable, evaluated as a message
+// argument whether the assertion passes or fails. The failing condition here
+// is exactly "key present", so v is the zero value (nil) on the passing
+// path, and v.Name would panic there once hoisted.
+func TestHoistDeclinesWhenTheMessageDereferencesACommaOkMapValue(t *testing.T) {
+	m := map[string]*node{}
+	if v, ok := m["k"]; ok {
+		t.Errorf("unexpected %s", v.Name)
+	}
+}
+
+// Same shape for a type assertion's comma-ok form: p is nil when ok is
+// false, which is the passing path for this condition.
+func TestHoistDeclinesWhenTheMessageDereferencesATypeAssertionValue(t *testing.T) {
+	var x any = &node{}
+	if p, ok := x.(*node); ok {
+		t.Errorf("unexpected %s", p.Name)
+	}
+}
+
+// p is nil on the passing path here too: err == nil means lookupNode found
+// nothing, and hoisting would still evaluate p.Name unconditionally as the
+// message argument.
+func TestHoistDeclinesWhenTheMessageDereferencesAnErrorTupleValue(t *testing.T) {
+	if p, err := lookupNode(); err == nil {
+		t.Fatalf("want error, got %s", p.Name)
+	}
+}
+
+func f() error                   { return nil }
+func g() error                   { return nil }
+func lookup() (bool, error)      { return false, nil }
+func lookupNode() (*node, error) { return nil, nil }

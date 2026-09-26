@@ -44,8 +44,9 @@ type tfix struct {
 //	             the variable
 //	IsType,      compile-time concerns once generics exist
 //	Implements
-//	Eventually,  no equivalent, and approximating one in a migration is how
-//	Never,       a test quietly stops meaning what it said
+//	Never,       no equivalent, and approximating one in a migration is how
+//	             a test quietly stops meaning what it said. Eventually used
+//	             to be listed here too, before EventuallyTrue gave it one.
 //	Regexp,
 //	JSONEq,
 //	YAMLEq,
@@ -88,6 +89,7 @@ var testifyMap = map[string]tfix{
 	"GreaterOrEqual": {method: "GreaterOrEqual", arity: 2, swap: true},
 	"Less":           {method: "Less", arity: 2, swap: true},
 	"LessOrEqual":    {method: "LessOrEqual", arity: 2, swap: true},
+	"Eventually":     {method: "EventuallyTrue", arity: 3},
 }
 
 // testifyCall recognises a testify call in this scope and returns the
@@ -206,6 +208,12 @@ func testifyCall(
 		if !sameType(pass, fixed[0], fixed[1]) || !isPointer(pass, fixed[0]) {
 			return "", nil, false, false
 		}
+	case "Eventually":
+		// testify orders these (condition, waitFor, tick); EventuallyTrue
+		// takes (timeout, tick, cond), so the two durations that describe how
+		// to poll sit together ahead of what to poll. A rotation, not the
+		// two-argument swap above.
+		fixed[0], fixed[1], fixed[2] = fixed[1], fixed[2], fixed[0]
 	}
 
 	out := make([]string, 0, len(rest))

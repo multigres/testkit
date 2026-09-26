@@ -8,6 +8,9 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 // The additions below were driven by counting what these projects actually
@@ -42,6 +45,14 @@ func TestAddedAssertionsPassOnGoodInput(t *testing.T) {
 	c.NotNil(p)
 	c.Nil(nil)
 
+	c.ErrorWhen(true, errors.New("boom"))
+	c.ErrorWhen(false, nil)
+	c.EqDiffOpts(
+		map[string]string{"a": "1"},
+		map[string]string{"a": "2"},
+		[]cmp.Option{cmpopts.IgnoreMapEntries(func(k, v string) bool { return k == "a" })},
+	)
+
 	if r.failed {
 		t.Fatalf("good input should not fail: fatals=%v errors=%v", r.fatals, r.errors)
 	}
@@ -53,28 +64,31 @@ func TestAddedAssertionsFailOnBadInput(t *testing.T) {
 	p := &struct{ n int }{}
 
 	for name, call := range map[string]func(*C){
-		"Fail":           func(c *C) { c.Fail() },
-		"Zero":           func(c *C) { c.Zero(1) },
-		"NotZero":        func(c *C) { c.NotZero(0) },
-		"Greater":        func(c *C) { c.Greater(2, 1) },
-		"GreaterOrEqual": func(c *C) { c.GreaterOrEqual(2, 1) },
-		"Less":           func(c *C) { c.Less(1, 2) },
-		"LessOrEqual":    func(c *C) { c.LessOrEqual(1, 2) },
-		"InDelta":        func(c *C) { c.InDelta(1.0, 2.0, 0.1) },
-		"InDeltaNaN":     func(c *C) { c.InDelta(1.0, math.NaN(), 0.1) },
-		"InDeltaNegSkew": func(c *C) { c.InDelta(1.0, 1.0, -1) },
-		"StrContains":    func(c *C) { c.StrContains("hello", "z") },
-		"NotStrContains": func(c *C) { c.NotStrContains("hello", "ell") },
-		"ElementsMatch":  func(c *C) { c.ElementsMatch([]int{1, 2}, []int{1, 3}) },
-		"EqualErrorNil":  func(c *C) { c.EqualError(nil, "boom") },
-		"EqualErrorDiff": func(c *C) { c.EqualError(errors.New("bang"), "boom") },
-		"ErrorAs":        func(c *C) { _ = c.ErrorAs[*customErr](errors.New("plain")) },
-		"Panics":         func(c *C) { c.Panics(func() {}) },
-		"NotPanics":      func(c *C) { c.NotPanics(func() { panic("x") }) },
-		"Same":           func(c *C) { c.Same(p, &struct{ n int }{}) },
-		"NotSame":        func(c *C) { c.NotSame(p, p) },
-		"Nil":            func(c *C) { c.Nil(p) },
-		"NotNil":         func(c *C) { c.NotNil(nil) },
+		"Fail":             func(c *C) { c.Fail() },
+		"Zero":             func(c *C) { c.Zero(1) },
+		"NotZero":          func(c *C) { c.NotZero(0) },
+		"Greater":          func(c *C) { c.Greater(2, 1) },
+		"GreaterOrEqual":   func(c *C) { c.GreaterOrEqual(2, 1) },
+		"Less":             func(c *C) { c.Less(1, 2) },
+		"LessOrEqual":      func(c *C) { c.LessOrEqual(1, 2) },
+		"InDelta":          func(c *C) { c.InDelta(1.0, 2.0, 0.1) },
+		"InDeltaNaN":       func(c *C) { c.InDelta(1.0, math.NaN(), 0.1) },
+		"InDeltaNegSkew":   func(c *C) { c.InDelta(1.0, 1.0, -1) },
+		"StrContains":      func(c *C) { c.StrContains("hello", "z") },
+		"NotStrContains":   func(c *C) { c.NotStrContains("hello", "ell") },
+		"ElementsMatch":    func(c *C) { c.ElementsMatch([]int{1, 2}, []int{1, 3}) },
+		"EqualErrorNil":    func(c *C) { c.EqualError(nil, "boom") },
+		"EqualErrorDiff":   func(c *C) { c.EqualError(errors.New("bang"), "boom") },
+		"ErrorAs":          func(c *C) { _ = c.ErrorAs[*customErr](errors.New("plain")) },
+		"Panics":           func(c *C) { c.Panics(func() {}) },
+		"NotPanics":        func(c *C) { c.NotPanics(func() { panic("x") }) },
+		"Same":             func(c *C) { c.Same(p, &struct{ n int }{}) },
+		"NotSame":          func(c *C) { c.NotSame(p, p) },
+		"Nil":              func(c *C) { c.Nil(p) },
+		"NotNil":           func(c *C) { c.NotNil(nil) },
+		"ErrorWhenWant":    func(c *C) { c.ErrorWhen(true, nil) },
+		"ErrorWhenNotWant": func(c *C) { c.ErrorWhen(false, errors.New("boom")) },
+		"EqDiffOpts":       func(c *C) { c.EqDiffOpts(map[string]string{"a": "1"}, map[string]string{"a": "2"}, nil) },
 	} {
 		r := &recorder{}
 		call(NewAborting(r))
@@ -418,5 +432,67 @@ func TestNotEqDiffIsNotNotEq(t *testing.T) {
 		if !r.failed {
 			t.Errorf("%s should have failed", name)
 		}
+	}
+}
+
+// TestErrorWhenFailsInBothDirections pins the reason ErrorWhen exists over a
+// bare Eq(wantErr, err != nil): the message has to say which way it went
+// wrong, not just report the two booleans that disagreed.
+func TestErrorWhenFailsInBothDirections(t *testing.T) {
+	t.Parallel()
+
+	r := &recorder{}
+	c := NewAborting(r)
+	c.ErrorWhen(true, nil)
+	if len(r.fatals) != 1 || !strings.Contains(r.fatals[0], "expected an error") {
+		t.Errorf("wantErr=true, err=nil: want a message about a missing error, got %v", r.fatals)
+	}
+
+	r2 := &recorder{}
+	c2 := NewAborting(r2)
+	c2.ErrorWhen(false, errors.New("boom"))
+	if len(r2.fatals) != 1 || !strings.Contains(r2.fatals[0], "unexpected error: boom") {
+		t.Errorf(
+			"wantErr=false, err=boom: want a message naming the unwanted error, got %v",
+			r2.fatals,
+		)
+	}
+
+	pass := &recorder{}
+	c3 := NewAborting(pass)
+	c3.ErrorWhen(true, errors.New("boom"))
+	c3.ErrorWhen(false, nil)
+	if pass.failed {
+		t.Errorf("matching cases should not fail: %v %v", pass.fatals, pass.errors)
+	}
+}
+
+// TestEqDiffOptsAppliesTheOptions pins the reason this takes opts as its own
+// slice rather than folding them into msgAndArgs: a cmp.Option satisfies any
+// exactly as well as a format string does, so the two have to stay apart at
+// the call site, and the options passed in have to actually reach cmp.Diff.
+func TestEqDiffOptsAppliesTheOptions(t *testing.T) {
+	t.Parallel()
+
+	ignoreA := []cmp.Option{cmpopts.IgnoreMapEntries(func(k, v string) bool { return k == "a" })}
+
+	pass := &recorder{}
+	NewAborting(pass).EqDiffOpts(
+		map[string]string{"a": "1", "b": "2"},
+		map[string]string{"a": "different", "b": "2"},
+		ignoreA,
+	)
+	if pass.failed {
+		t.Errorf("the ignored key should not have been compared: %v", pass.fatals)
+	}
+
+	r := &recorder{}
+	NewAborting(r).EqDiffOpts(
+		map[string]string{"a": "1", "b": "2"},
+		map[string]string{"a": "1", "b": "different"},
+		ignoreA,
+	)
+	if len(r.fatals) != 1 || !strings.Contains(r.fatals[0], "(-want +got)") {
+		t.Errorf("a real difference in a non-ignored key should still fail: %v", r.fatals)
 	}
 }

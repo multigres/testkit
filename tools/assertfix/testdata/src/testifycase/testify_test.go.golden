@@ -5,8 +5,11 @@ package testifycase // want `imports need the testkit/assert path`
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/multigres/testkit/assert"
+
+	"reflect"
 )
 
 type box struct{ N int }
@@ -62,6 +65,49 @@ func TestNegatedErrorAndFilesystemAssertions(t *testing.T) { // want `5 assertio
 	c.NoFileExists("/nonexistent")
 	c.DirExists("/tmp")
 	c.NoDirExists("/nonexistent")
+}
+
+// testify's Eventually takes the condition first and an explicit tick;
+// EventuallyTrue takes the timeout and tick first, the condition last, so
+// the call is rebuilt rather than just reordered in place. require aborts
+// on a timeout the same way it does everywhere else here, and assert
+// continues.
+func TestEventuallyMapsWithTickAndReceiverMode(t *testing.T) { // want `2 assertion\(s\) can use testkit/assert`
+	c := assert.NewCollecting(t)
+	c.EventuallyTrue(time.Second, 100*time.Millisecond, condTrue, "should converge")
+	c.Require().EventuallyTrue(time.Second, 200*time.Millisecond, condTrue)
+}
+
+func condTrue() bool { return true }
+
+// ObjectsAreEqual is always safe to become reflect.DeepEqual, verified
+// against testify's own source (see the assertfix README): there is no
+// operand type this needs to refuse.
+func TestObjectsAreEqualBecomesReflectDeepEqual(t *testing.T) { // want `1 assertion can use testkit/assert`
+	want := []string{"a", "b"}
+	got := []string{"a", "c"}
+	matched := reflect.DeepEqual(want, got) // want `assert.ObjectsAreEqual can become reflect.DeepEqual`
+	assert.NewCollecting(t).True(matched, "mismatch: want %v, got %v", want, got)
+}
+
+// A call nested inside another testify call's arguments converts by
+// embedding: assert.True itself becomes a site, and rendering its own
+// argument substitutes the nested ObjectsAreEqual call as part of that
+// rewrite, rather than as a second, independent edit that would overlap it.
+func TestObjectsAreEqualEmbedsInsideAnotherTestifyCall(t *testing.T) { // want `1 assertion can use testkit/assert`
+	want := []string{"a", "b"}
+	got := []string{"a", "b"}
+	assert.NewCollecting(t).True(reflect.DeepEqual(want, got))
+}
+
+// The same embedding reaches inside a closure passed to Eventually, since
+// EventuallyTrue's own conversion renders that closure's body too.
+func TestObjectsAreEqualEmbedsInsideAnEventuallyClosure(t *testing.T) { // want `1 assertion can use testkit/assert`
+	want := []string{"a", "b"}
+	got := []string{"a", "b"}
+	assert.NewAborting(t).EventuallyTrue(time.Second, 10*time.Millisecond, func() bool {
+		return reflect.DeepEqual(want, got)
+	})
 }
 
 var errSentinel = errors.New("sentinel")

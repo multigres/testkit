@@ -341,6 +341,21 @@ func (c *C) EqDiff[T any](want, got T, msgAndArgs ...any) {
 	}
 }
 
+// EqDiffOpts is EqDiff with cmp options, for a comparison that needs to
+// ignore a field or supply its own comparator.
+//
+// A separate method rather than a variadic tail on EqDiff: EqDiff's
+// msgAndArgs is already `...any`, and a cmp.Option satisfies any exactly as
+// well as a format string does, so a call mixing the two would be ambiguous
+// at best and silently misparsed at worst. Taking opts as its own slice
+// parameter keeps the two apart.
+func (c *C) EqDiffOpts[T any](want, got T, opts []cmp.Option, msgAndArgs ...any) {
+	c.Helper()
+	if diff := cmp.Diff(want, got, opts...); diff != "" {
+		c.fail("mismatch (-want +got):\n%s%s", diff, msg(msgAndArgs))
+	}
+}
+
 // NotEqDiff fails if want and got are deeply equal.
 //
 // The counterpart to EqDiff, and it exists for the reason NotEqDeep does:
@@ -445,6 +460,23 @@ func (c *C) ErrorContains(err error, want string, msgAndArgs ...any) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		c.fail("want an error containing %q, got %v%s", want, err, msg(msgAndArgs))
+	}
+}
+
+// ErrorWhen fails unless err's presence matches wantErr.
+//
+// The assertion behind `if (err != nil) != wantErr { fail }`, the shape a
+// table test writes when one row wants an error and the next does not. Two
+// messages rather than one, because "want true, got false" from a bare
+// comparison of the boolean says nothing about which direction went wrong:
+// this says whether an error was wanted and missing, or unwanted and present.
+func (c *C) ErrorWhen(wantErr bool, err error, msgAndArgs ...any) {
+	c.Helper()
+	switch {
+	case wantErr && err == nil:
+		c.fail("expected an error, got nil%s", msg(msgAndArgs))
+	case !wantErr && err != nil:
+		c.fail("unexpected error: %v%s", err, msg(msgAndArgs))
 	}
 }
 
