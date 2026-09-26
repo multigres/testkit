@@ -167,3 +167,29 @@ func getFieldErr(fail bool) *fieldErr {
 }
 
 func doThing() error { return nil }
+
+// An index the condition itself evaluates is safe on both paths, so it does
+// not block conversion the way a bounds-guarded one does.
+func TestIndexAlreadyInTheConditionIsConverted(t *testing.T) { // want `1 assertion can use testkit/assert`
+	got, want := []int{1}, []int{1}
+	i := 0
+	if got[i] != want[i] {
+		t.Errorf("at %d: got %d", i, got[i])
+	}
+}
+
+type client struct{}
+
+// A parameter the body never mentions still owns its name in the function's
+// scope, so the receiver cannot be `c`.
+func TestReceiverAvoidsAnUnusedParameter(t *testing.T) {
+	check := func(t *testing.T, c *client) { // want `2 assertion\(s\) can use testkit/assert`
+		if 1 != 2 {
+			t.Errorf("one")
+		}
+		if 3 != 4 {
+			t.Errorf("three")
+		}
+	}
+	check(t, nil)
+}

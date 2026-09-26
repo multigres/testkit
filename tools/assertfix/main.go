@@ -115,7 +115,7 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 	var scopes []*scope
 
-	collect := func(body *ast.BlockStmt, tName string) {
+	collect := func(ft *ast.FuncType, body *ast.BlockStmt, tName string) {
 		sc := &scope{body: body, tName: tName}
 
 		// The block and index of every statement in this function, for hoist
@@ -269,7 +269,7 @@ func run(pass *analysis.Pass) (any, error) {
 				if !messageArgsAreSafe(pass, ce.Args) {
 					return true
 				}
-			} else if guardsItsMessage(pass, ifs) {
+			} else if guardsItsMessage(pass, ifs) || boundsItsMessage(pass, ifs) {
 				return true
 			}
 			margs := make([]string, 0, len(ce.Args))
@@ -381,7 +381,7 @@ func run(pass *analysis.Pass) (any, error) {
 			return false
 		})
 		if len(sc.sites) > 0 {
-			sc.recv = freeName(body)
+			sc.recv = freeName(ft, body)
 			scopes = append(scopes, sc)
 		}
 	}
@@ -393,14 +393,14 @@ func run(pass *analysis.Pass) (any, error) {
 				return
 			}
 			if name := nestedT(f.Type); name != "" {
-				collect(f.Body, name)
+				collect(f.Type, f.Body, name)
 			}
 		case *ast.FuncLit:
 			if !inTest(f.Pos()) {
 				return
 			}
 			if name := nestedT(f.Type); name != "" {
-				collect(f.Body, name)
+				collect(f.Type, f.Body, name)
 			}
 		}
 	})
@@ -681,8 +681,24 @@ func isTestPreamble(st ast.Stmt, tName string) bool {
 // `c` is the name worth having and plenty of tests already use it for a
 // config, a client or a channel. Shadowing one produces code that compiles
 // in some scopes and not others, so take the first name nobody has claimed.
-func freeName(body *ast.BlockStmt) string {
+//
+// The signature counts as well as the body: a parameter or named result the
+// body never mentions is still declared in the same scope, so `c :=` at the
+// top of `func(t *testing.T, c *Client)` does not compile. Any name the body
+// does mention, including one from an enclosing scope, is an Ident in the
+// body and is caught by the body walk, so shadowing one is never silent.
+func freeName(ft *ast.FuncType, body *ast.BlockStmt) string {
 	used := map[string]bool{}
+	for _, fl := range []*ast.FieldList{ft.Params, ft.Results} {
+		if fl == nil {
+			continue
+		}
+		for _, f := range fl.List {
+			for _, id := range f.Names {
+				used[id.Name] = true
+			}
+		}
+	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		if id, ok := n.(*ast.Ident); ok {
 			used[id.Name] = true
@@ -843,6 +859,77 @@ func guardsItsMessage(pass *analysis.Pass, ifs *ast.IfStmt) bool {
 	call := ifs.Body.List[0].(*ast.ExprStmt).X.(*ast.CallExpr)
 	for _, a := range call.Args {
 		if derefs(pass, a, guarded) {
+			return true
+		}
+	}
+	return false
+}
+
+// boundsItsMessage reports whether the failure message indexes or slices
+// with something the condition constrains, which is the bounds-check
+// counterpart of guardsItsMessage's nil and emptiness shapes:
+//
+//	if i >= 0      { t.Fatalf("at %d: %v", i, turns[i]) }   // i is -1 outside
+//	if n < len(s)  { t.Errorf("got %v", s[n]) }             // n is past the end
+//
+// The condition is evaluated on both paths, so an index expression that
+// appears in the condition itself (`if got[i] != want[i] { ... got[i] }`) is
+// already proven safe and does not count. Map indexing never panics and is
+// skipped. What is left is any index or slice sharing a variable with the
+// condition, where the condition's truth may be the only thing keeping it in
+// range. Deciding whether this particular comparison actually bounds this
+// particular index is range analysis, and a declined site stays a correct
+// if-statement, so this declines on the shared variable alone.
+func boundsItsMessage(pass *analysis.Pass, ifs *ast.IfStmt) bool {
+	condVars := map[types.Object]bool{}
+	condExprs := map[string]bool{}
+	ast.Inspect(ifs.Cond, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.Ident:
+			if obj, ok := pass.TypesInfo.Uses[v].(*types.Var); ok {
+				condVars[obj] = true
+			}
+		case *ast.IndexExpr, *ast.SliceExpr:
+			condExprs[render(pass, v.(ast.Expr))] = true
+		}
+		return true
+	})
+	if len(condVars) == 0 {
+		return false
+	}
+	sharesVar := func(e ast.Expr) bool {
+		found := false
+		ast.Inspect(e, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && condVars[pass.TypesInfo.Uses[id]] {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+	call := ifs.Body.List[0].(*ast.ExprStmt).X.(*ast.CallExpr)
+	for _, a := range call.Args {
+		found := false
+		ast.Inspect(a, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			switch v := n.(type) {
+			case *ast.IndexExpr:
+				if _, isMap := pass.TypesInfo.TypeOf(v.X).Underlying().(*types.Map); isMap {
+					return true
+				}
+			case *ast.SliceExpr:
+			default:
+				return true
+			}
+			e := n.(ast.Expr)
+			if !condExprs[render(pass, e)] && sharesVar(e) {
+				found = true
+			}
+			return !found
+		})
+		if found {
 			return true
 		}
 	}

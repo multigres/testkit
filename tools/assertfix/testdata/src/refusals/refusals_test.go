@@ -130,3 +130,18 @@ func f() error                   { return nil }
 func g() error                   { return nil }
 func lookup() (bool, error)      { return false, nil }
 func lookupNode() (*node, error) { return nil, nil }
+
+// A bounds check guards an index the same way a nil check guards a
+// dereference: on the passing path i is -1, so turns[i] as an eager assertion
+// argument panics exactly when the test would have passed.
+func TestBoundsGuardedMessageIsNotConverted(t *testing.T) {
+	turns := []node{{Name: "a"}}
+	i := -1
+	if i >= 0 {
+		t.Fatalf("ejected at %d (%s)", i, turns[i].Name)
+	}
+	n := 3
+	if n < len(turns) {
+		t.Errorf("got %v", turns[n:])
+	}
+}

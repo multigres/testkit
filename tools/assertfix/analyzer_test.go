@@ -157,7 +157,7 @@ func TestFreeNameAvoidsEveryIdentifierInScope(t *testing.T) {
 		{`{ c, ck := 1, 2; _, _ = c, ck }`, "chk"},
 		{`{ c, ck, chk, asrt, assertC := 1, 2, 3, 4, 5; _, _, _, _, _ = c, ck, chk, asrt, assertC }`, "assertC0"},
 	} {
-		if got := freeName(parseBlock(t, tc.body)); got != tc.want {
+		if got := freeName(&ast.FuncType{}, parseBlock(t, tc.body)); got != tc.want {
 			t.Errorf("freeName(%s) = %q, want %q", tc.body, got, tc.want)
 		}
 	}
