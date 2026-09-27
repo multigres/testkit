@@ -86,7 +86,13 @@ func (s *DataPlaneSim) tickPods(ctx context.Context) {
 		}
 		p.Status.ContainerStatuses = containerStatuses(p.Spec.Containers)
 		p.Status.InitContainerStatuses = initContainerStatuses(p.Spec.InitContainers)
-		_ = s.c.Status().Patch(ctx, p, client.MergeFrom(base))
+		// Strategic merge, not JSON merge: a JSON merge patch replaces the
+		// whole conditions array with this tick's snapshot, deleting any
+		// condition another writer (a controller's readiness gate) added
+		// since the List. Real kubelet merges non-kubelet conditions from a
+		// fresh read, so the sim must not clobber them either. The other
+		// status patches below use it for the same reason.
+		_ = s.c.Status().Patch(ctx, p, client.StrategicMergeFrom(base))
 	}
 }
 
@@ -214,7 +220,7 @@ func (s *DataPlaneSim) tickDeployments(ctx context.Context) {
 				LastUpdateTime:     metav1.Now(),
 			},
 		}
-		_ = s.c.Status().Patch(ctx, d, client.MergeFrom(base))
+		_ = s.c.Status().Patch(ctx, d, client.StrategicMergeFrom(base))
 	}
 }
 
@@ -246,7 +252,7 @@ func (s *DataPlaneSim) tickStatefulSets(ctx context.Context) {
 		ss.Status.UpdatedReplicas = want
 		ss.Status.CurrentRevision = ss.Name + "-rev"
 		ss.Status.UpdateRevision = ss.Name + "-rev"
-		_ = s.c.Status().Patch(ctx, ss, client.MergeFrom(base))
+		_ = s.c.Status().Patch(ctx, ss, client.StrategicMergeFrom(base))
 	}
 }
 
@@ -266,6 +272,6 @@ func (s *DataPlaneSim) tickPVCs(ctx context.Context) {
 		if pvc.Spec.Resources.Requests != nil {
 			pvc.Status.Capacity = pvc.Spec.Resources.Requests
 		}
-		_ = s.c.Status().Patch(ctx, pvc, client.MergeFrom(base))
+		_ = s.c.Status().Patch(ctx, pvc, client.StrategicMergeFrom(base))
 	}
 }
