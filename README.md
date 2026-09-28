@@ -19,6 +19,83 @@ receiver `assert` provides, so a test says `c.Eq(...)` and `c.Get(key, obj)`
 against one object. Importing `assert` alone is supported and costs you none of
 the harness.
 
+## What `ctrltest` gets you
+
+The usual envtest suite calls `Reconcile` once by hand and checks what it
+wrote. That covers what one pass computes and nothing about what a controller
+does over time: whether it converges, how often it requeues, whether it
+writes when nothing changed, or what happens when two controllers react to
+each other. `ctrltest` runs the real managers against a real API server and
+makes all of that assertable.
+
+- **Every controller at once, across operators.** Register as many
+  reconcilers as production runs, in as many managers as there are
+  operators, against one envtest. Protocols between controllers, and between
+  operators in different repos, become testable instead of unreachable.
+- **Every write, attributed.** Each create, update, patch, status write and
+  delete is recorded against the controller and the reconcile pass that
+  issued it, including writes the API server rejected. Cursors consume that
+  log in order (`WaitForCreate`, `WaitForStatusPatch`, `WaitForAll`,
+  `RequireNoActionTaken`), scoped to one controller when several share a
+  namespace.
+- **Every reconcile, including the ones that did nothing.** The interceptor
+  records each pass with its result, error, duration and requested requeue.
+  Most reconciles write nothing, and the op log alone can't see them. This
+  can.
+- **Requeues in milliseconds.** A `RequeueAfter` of a minute is clamped to
+  50ms, and the original request is still recorded. A test of a controller
+  that polls every minute finishes in seconds, and `WaitForRequeue` can still
+  assert that it asked for the minute.
+- **Isolated parallel tests.** `Suite.Case(t)` gives each test its own
+  namespace, and a gate admits only that test's reconciles. When the test
+  ends the gate closes, so a finished test's objects stop reconciling rather
+  than burning CPU and cluttering the next test's logs.
+- **Quiescence that cannot pass vacuously.** `RequireQuiescent` counts
+  attempted writes as well as watch events, because an identical write moves
+  no `resourceVersion` and so fires no event: one multigres-operator
+  controller issued 3,641 such patches against a single object in three
+  minutes, invisible to any watch. It also catches a controller wedged
+  retrying a rejected write, and one whose last pass errored. It refuses to
+  call a namespace converged if nothing ever reconciled in it, so a
+  mis-wired test fails instead of passing on silence.
+- **Closed-world scripts.** A `Script` step declares exactly which changes it
+  permits (`Added`, `Deleted`, `Changed` down to the field path, `Quiet`,
+  ordering with `Before`), and any other event fails it. `Invariant` checks a
+  predicate against every event for the whole script. Events from all watched
+  kinds are merged in `resourceVersion` order. Every script must end with
+  `Finish`, and forgetting it is reported as a failure.
+- **Known defects that expire.** `KnownDefect` pins a live bug: the test
+  passes while the bug is present and fails the day it is fixed, telling you
+  to replace the pin with a real assertion. It can't quietly outlive the bug.
+- **A data plane envtest doesn't have.** `DataPlaneSim` makes Pods Running and
+  Ready, gives Deployments and StatefulSets status matching their replicas,
+  and binds PVCs, so controllers that wait on readiness make progress.
+- **Failures that come with evidence.** Every `Case` attaches a failure dump:
+  the op log around the failing assertion, interleaved with the reconcile
+  passes that produced it and with other controllers' writes out of scope. A
+  race between two controllers shows up on adjacent lines.
+
+```go
+c := suite.Case(t)
+cfg := &corev1.ConfigMap{
+	ObjectMeta: metav1.ObjectMeta{Name: "cfg", Namespace: c.NS},
+	Data:       map[string]string{"a": "1"},
+}
+
+sc := c.NewScript(&corev1.ConfigMapList{})
+sc.Step("create the config", func() error {
+	return c.Create(cfg)
+}, ctrltest.Added("ConfigMap", "cfg"))
+sc.Step("change one key", func() error {
+	cfg.Data["a"] = "2"
+	return c.Update(cfg)
+}, ctrltest.Changed("ConfigMap", "cfg", "data.a"))
+sc.Finish(time.Second)
+```
+
+If either step also caused anything else, such as a status write nobody
+declared, the step fails and names the event.
+
 ## Versioning
 
 `v0`, and expect it to stay there for a while. Under SemVer that means any
@@ -45,11 +122,17 @@ not just any `v0`: pin the root module to that version alongside the tool.
 gained in 1.27, so the floor is not optional: setting a lower `go` directive
 and running `go mod tidy` rewrites it back.
 
-What the generics buy is a compile-time check on the comparison itself.
+What the generics buy is a compile-time check on the comparison itself: both
+sides must be the same type.
 
 ```go
-c.Eq(1, int64(1))   // does not compile
+var n int = 1
+c.Eq(n, int64(1))   // does not compile: int64 does not match inferred type int
+c.Eq(1, int64(1))   // compiles: the untyped constant 1 is inferred as int64
 ```
+
+Untyped constants still adapt to the other side, as they do everywhere in Go,
+so the check bites on typed values: a field, a variable, a function's result.
 
 `ctrltest` additionally requires **controller-runtime v0.25.1 or newer**,
 stated here rather than left to arrive as a transitive surprise inside
@@ -91,9 +174,9 @@ each closing a decline the tool found rather than one guessed at:
 
 Two omissions are deliberate rather than pending:
 
-- **Type-coercing equality.** An assertion that accepts `1` against
-  `int64(1)` gives up the compile-time check that the generic signatures
-  exist for. Convert explicitly at the call site instead.
+- **Type-coercing equality.** An assertion that accepts an `int` against an
+  `int64` gives up the compile-time check that the generic signatures exist
+  for. Convert explicitly at the call site instead.
 - **`IsType` and `Implements`.** Generics turned these into compile-time
   concerns, so there is nothing left for a runtime assertion to add.
 

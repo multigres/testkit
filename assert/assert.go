@@ -17,7 +17,7 @@
 // the bar for adding to it.
 //
 // Two kinds of assertion are left out on purpose. Type-coercing equality,
-// which accepts 1 against int64(1), gives up the compile-time check the
+// which accepts an int against an int64, gives up the compile-time check the
 // generic signatures exist for; convert explicitly at the call site instead.
 // And IsType and Implements, which generics turned into compile-time
 // concerns, so a runtime assertion has nothing to add.
