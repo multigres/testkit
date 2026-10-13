@@ -176,6 +176,10 @@ type Suite struct {
 	managers []*Manager
 	byName   map[string]*Manager
 
+	// sim is the data plane simulator, nil when Options.SimInterval is not
+	// positive. Kept so C.FaultPods can reach it.
+	sim *DataPlaneSim
+
 	// simDone closes when the data plane simulator's goroutine has returned.
 	// Nil when no simulator was started.
 	simDone chan struct{}
@@ -376,10 +380,11 @@ func Boot(opts Options) (*Suite, func() error, error) {
 	// looked, which is the shape of an intermittent CI failure rather than of
 	// a clean shutdown.
 	if opts.SimInterval > 0 {
+		s.sim = NewDataPlaneSim(s.Client, opts.SimInterval)
 		s.simDone = make(chan struct{})
 		go func() {
 			defer close(s.simDone)
-			NewDataPlaneSim(s.Client, opts.SimInterval).Run(ctx)
+			s.sim.Run(ctx)
 		}()
 	}
 

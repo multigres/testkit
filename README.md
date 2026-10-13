@@ -67,9 +67,13 @@ makes all of that assertable.
 - **Known defects that expire.** `KnownDefect` pins a live bug: the test
   passes while the bug is present and fails the day it is fixed, telling you
   to replace the pin with a real assertion. It can't quietly outlive the bug.
-- **A data plane envtest doesn't have.** `DataPlaneSim` makes Pods Running and
-  Ready, gives Deployments and StatefulSets status matching their replicas,
-  and binds PVCs, so controllers that wait on readiness make progress.
+- **A data plane envtest doesn't have.** `DataPlaneSim` reports Pods the way
+  kubelet would, native sidecars and readiness gates included, gives
+  Deployments and StatefulSets status matching their replicas, and binds PVCs,
+  so controllers that wait on readiness make progress. `C.FaultPods` breaks
+  chosen pods (unschedulable, a container failing readiness, a container or
+  init container crashlooping), so a test can show what a controller does when
+  they don't.
 - **Failures that come with evidence.** Every `Case` attaches a failure dump:
   the op log around the failing assertion, interleaved with the reconcile
   passes that produced it and with other controllers' writes out of scope. A

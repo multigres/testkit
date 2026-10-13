@@ -4,13 +4,13 @@ package ctrltest
 
 import (
 	"context"
-	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -18,17 +18,32 @@ import (
 // Deployment/StatefulSet controllers, and the volume provisioner.
 //
 // Modelled:
-//   - Pods reach Running with a podIP and Ready/ContainersReady/Initialized/
-//     PodScheduled conditions true, and per-container Ready statuses.
+//   - Pods reach Running with a podIP and the conditions and container
+//     statuses kubelet reports. Sidecars (init containers with restartPolicy
+//     Always) run alongside the regular containers and count toward
+//     ContainersReady; other init containers complete first.
+//   - Ready follows kubelet: ContainersReady and every readiness gate
+//     condition True. The simulator never writes a gate condition itself, so
+//     a pod with a gate nobody sets stays not Ready, as it would on a cluster.
+//   - Pods made unschedulable, not ready or crashlooping by a PodFault
+//     (SetPodFaults, C.FaultPods).
 //   - Deployments and StatefulSets report status matching spec.replicas.
 //   - PVCs reach Bound.
 //
-// Not modelled: scheduling failure, eviction, container restart, node pressure,
-// real volume attachment, or any ordering between them.
+// Not modelled: eviction, node pressure, real volume attachment, actual
+// restarts, or any ordering between them. Deployment and StatefulSet status is
+// synthetic and does not follow pod faults: envtest runs no ReplicaSet or
+// StatefulSet controller, so the pods behind them do not exist to fault.
 type DataPlaneSim struct {
 	c        client.Client
 	interval time.Duration
+
+	// podIPSeq is only touched from the sweep goroutine.
 	podIPSeq int
+
+	// mu guards faults, which tests install from their own goroutines.
+	mu     sync.Mutex
+	faults map[string]*podFaultRule
 }
 
 // NewDataPlaneSim returns a simulator that patches status on every object it
@@ -59,33 +74,18 @@ func (s *DataPlaneSim) tickPods(ctx context.Context) {
 	if err := s.c.List(ctx, list); err != nil {
 		return
 	}
+	now := metav1.Now()
 	for i := range list.Items {
 		p := &list.Items[i]
 		if !p.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if podSimSatisfied(p) {
+		want := s.podStatus(p, s.podFault(p), now)
+		if equality.Semantic.DeepEqual(want, p.Status) {
 			continue
 		}
 		base := p.DeepCopy()
-		p.Status.Phase = corev1.PodRunning
-		if p.Status.PodIP == "" {
-			s.podIPSeq++
-			p.Status.PodIP = fmt.Sprintf("10.244.%d.%d", s.podIPSeq/250, s.podIPSeq%250+1)
-			p.Status.PodIPs = []corev1.PodIP{{IP: p.Status.PodIP}}
-			p.Status.HostIP = "10.0.0.1"
-		}
-		p.Status.StartTime = &metav1.Time{Time: time.Now()}
-		for _, ct := range []corev1.PodConditionType{
-			corev1.PodScheduled,
-			corev1.PodInitialized,
-			corev1.ContainersReady,
-			corev1.PodReady,
-		} {
-			setPodCondition(p, ct)
-		}
-		p.Status.ContainerStatuses = containerStatuses(p.Spec.Containers)
-		p.Status.InitContainerStatuses = initContainerStatuses(p.Spec.InitContainers)
+		p.Status = want
 		// Strategic merge, not JSON merge: a JSON merge patch replaces the
 		// whole conditions array with this tick's snapshot, deleting any
 		// condition another writer (a controller's readiness gate) added
@@ -94,89 +94,6 @@ func (s *DataPlaneSim) tickPods(ctx context.Context) {
 		// status patches below use it for the same reason.
 		_ = s.c.Status().Patch(ctx, p, client.StrategicMergeFrom(base))
 	}
-}
-
-func podSimSatisfied(p *corev1.Pod) bool {
-	if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
-		return false
-	}
-	if len(p.Status.ContainerStatuses) != len(p.Spec.Containers) {
-		return false
-	}
-	want := map[corev1.PodConditionType]bool{
-		corev1.PodScheduled:    false,
-		corev1.PodInitialized:  false,
-		corev1.ContainersReady: false,
-		corev1.PodReady:        false,
-	}
-	for _, c := range p.Status.Conditions {
-		if _, ok := want[c.Type]; ok && c.Status == corev1.ConditionTrue {
-			want[c.Type] = true
-		}
-	}
-	for _, ok := range want {
-		if !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func setPodCondition(p *corev1.Pod, t corev1.PodConditionType) {
-	for i := range p.Status.Conditions {
-		if p.Status.Conditions[i].Type == t {
-			if p.Status.Conditions[i].Status != corev1.ConditionTrue {
-				p.Status.Conditions[i].Status = corev1.ConditionTrue
-				p.Status.Conditions[i].LastTransitionTime = metav1.Now()
-			}
-			return
-		}
-	}
-	p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
-		Type:               t,
-		Status:             corev1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
-	})
-}
-
-func containerStatuses(cs []corev1.Container) []corev1.ContainerStatus {
-	out := make([]corev1.ContainerStatus, 0, len(cs))
-	for _, c := range cs {
-		out = append(out, corev1.ContainerStatus{
-			Name:        c.Name,
-			Image:       c.Image,
-			ImageID:     "sha256:" + c.Name,
-			ContainerID: "containerd://" + c.Name,
-			Ready:       true,
-			Started:     ptr.To(true),
-			State: corev1.ContainerState{
-				Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()},
-			},
-		})
-	}
-	return out
-}
-
-func initContainerStatuses(cs []corev1.Container) []corev1.ContainerStatus {
-	out := make([]corev1.ContainerStatus, 0, len(cs))
-	for _, c := range cs {
-		out = append(out, corev1.ContainerStatus{
-			Name:        c.Name,
-			Image:       c.Image,
-			ImageID:     "sha256:" + c.Name,
-			ContainerID: "containerd://" + c.Name,
-			Ready:       true,
-			Started:     ptr.To(true),
-			State: corev1.ContainerState{
-				Terminated: &corev1.ContainerStateTerminated{
-					ExitCode:   0,
-					Reason:     "Completed",
-					FinishedAt: metav1.Now(),
-				},
-			},
-		})
-	}
-	return out
 }
 
 func (s *DataPlaneSim) tickDeployments(ctx context.Context) {
