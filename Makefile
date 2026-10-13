@@ -184,21 +184,28 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Install golangci-lint locally if necessary
 # golangci-lint's own go.mod selects an older toolchain than this module, and
-# installing under it fails. Pin the install to whatever Go is running make.
+# installing under it fails. Pin the install to whatever Go is running make,
+# and put that version in the binary's name: CI restores bin/ from a cache
+# keyed on go.sum and this Makefile, not on the Go that setup-go resolves
+# "go 1.27" to, so a name keyed only on the linter's version reused a binary
+# built by the previous patch release, which cannot read the new standard
+# library's export data.
 $(GOLANGCI_LINT): export GOTOOLCHAIN = $(shell go env GOVERSION)
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION),$(shell go env GOVERSION))
 
 # go-install-tool installs $2@$3 as $1, keeping one binary per version so a
-# version bump reinstalls rather than silently reusing the old one.
+# version bump reinstalls rather than silently reusing the old one. $4, if
+# given, is an extra suffix for the binary's name, such as the Go version it
+# was built with, for a tool whose binary goes stale when that changes.
 define go-install-tool
-@[ -f "$(1)-$(3)" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$(1)-$(3)" ] || { \
+@[ -f "$(1)-$(3)$(if $(4),-$(4))" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$(1)-$(3)$(if $(4),-$(4))" ] || { \
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
 rm -f $(1) ;\
 GOBIN=$(LOCALBIN) go install $${package} ;\
-mv $(1) $(1)-$(3) ;\
+mv $(1) $(1)-$(3)$(if $(4),-$(4)) ;\
 } ;\
-ln -sf $$(realpath $(1)-$(3)) $(1)
+ln -sf $$(realpath $(1)-$(3)$(if $(4),-$(4))) $(1)
 endef
