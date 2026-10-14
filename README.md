@@ -73,7 +73,13 @@ makes all of that assertable.
   so controllers that wait on readiness make progress. `C.FaultPods` breaks
   chosen pods (unschedulable, a container failing readiness, a container or
   init container crashlooping), so a test can show what a controller does when
-  they don't.
+  they don't. Two more features are opt-in: `Options.SimWorkloads` makes it
+  act as the Deployment and StatefulSet controllers instead, creating and
+  deleting pods and claims to match spec, so a pod fault reaches their status
+  the way it would on a real cluster; `Options.SimGarbageCollection` makes it
+  act as the garbage collector over `Options.WatchedKinds`, cascading a delete
+  and honouring the `foregroundDeletion` and `orphan` finalizers, which
+  envtest otherwise leaves for a consumer to work around by hand.
 - **Failures that come with evidence.** Every `Case` attaches a failure dump:
   the op log around the failing assertion, interleaved with the reconcile
   passes that produced it and with other controllers' writes out of scope. A

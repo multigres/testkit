@@ -56,6 +56,26 @@ type Options struct {
 	// data plane.
 	SimInterval time.Duration
 
+	// SimWorkloads makes the data plane simulator act as the Deployment and
+	// StatefulSet controllers: creating and deleting pods and claims to match
+	// spec, and driving status from what those pods actually report, instead
+	// of the synthetic status-matches-spec it reports by default. Off by
+	// default, so a consumer relying on the synthetic behaviour sees no
+	// change until it asks for this. Ignored when SimInterval is not
+	// positive.
+	SimWorkloads bool
+
+	// SimGarbageCollection makes the data plane simulator act as Kubernetes'
+	// garbage collector over WatchedKinds: deleting a dependent once every
+	// owner reference on it is dangling, and honouring the foregroundDeletion
+	// and orphan finalizers. Off by default. Ignored when SimInterval is not
+	// positive.
+	//
+	// Only dependents of a watched kind are visible to it, same as
+	// RequireQuiescent and for the same reason: a kind missing from
+	// WatchedKinds is a kind the harness never lists.
+	SimGarbageCollection bool
+
 	// Managers is one entry per operator under test, started in order.
 	//
 	// A slice rather than a map so that start order is the order written
@@ -380,7 +400,16 @@ func Boot(opts Options) (*Suite, func() error, error) {
 	// looked, which is the shape of an intermittent CI failure rather than of
 	// a clean shutdown.
 	if opts.SimInterval > 0 {
-		s.sim = NewDataPlaneSim(s.Client, opts.SimInterval)
+		s.sim = NewDataPlaneSimWithOptions(s.Client, opts.SimInterval, DataPlaneSimOptions{
+			Workloads:         opts.SimWorkloads,
+			GarbageCollection: opts.SimGarbageCollection,
+			WatchedKinds:      opts.WatchedKinds,
+			// The dynamic RESTMapper client.New builds against the live
+			// apiserver when none is supplied, so scope resolution for an
+			// owner reference works for a CRD registered after Boot, not just
+			// a kind known when the suite came up.
+			RESTMapper: s.Client.RESTMapper(),
+		})
 		s.simDone = make(chan struct{})
 		go func() {
 			defer close(s.simDone)

@@ -66,6 +66,14 @@ func TestMain(m *testing.M) {
 			&appsv1.StatefulSetList{},
 		},
 		SimInterval: 250 * time.Millisecond,
+		// Both on for this package's own suite, same reasoning as running two
+		// managers below: nothing here creates a Deployment or StatefulSet
+		// outside TestWorkloadSimulationEndToEnd, or an owner reference
+		// outside the garbage collection tests, so every other test in this
+		// package runs unaffected and the end-to-end path gets covered
+		// through envtest rather than only through a fake client.
+		SimWorkloads:         true,
+		SimGarbageCollection: true,
 		// Two managers rather than one, in the package's own suite, so that
 		// the multi-operator path is what every test here runs against
 		// rather than something exercised once and then left to rot. They
