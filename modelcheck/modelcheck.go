@@ -27,8 +27,13 @@ type State[S any] interface {
 // from s by a single step of this actor, each under a name of the form
 // "<verb> <target>", for example "failover p1". Coverage groups by verb.
 //
-// The engine passes Moves a clone of the stored state, but an actor that yields
+// The engine passes Moves a state it may mutate, but an actor that yields
 // several successors from one call must still build each from its own copy.
+// Moves must be deterministic: states are not kept, they are rebuilt by
+// running Moves again, so the engine panics if a replay does not reproduce
+// what was explored. Move names should be unique per actor per state so that a
+// trace is readable; if two moves share a name they are told apart by the order
+// they are yielded in.
 type Actor[S any] interface {
 	Name() string
 	Moves(s S) iter.Seq2[string, S]
@@ -123,6 +128,18 @@ func (sys *System[S]) Recoverable(name string, goal func(S) bool, actors ...stri
 type Options struct {
 	MaxStates int // 0 means 1_000_000
 	MaxDepth  int // 0 means unbounded
+
+	// Workers is how many goroutines expand states concurrently. 0 means
+	// runtime.GOMAXPROCS(0). Results are identical for every value; 1 runs
+	// everything on the calling goroutine.
+	Workers int
+
+	// ExactKeys deduplicates on the full Key string. By default states are
+	// deduplicated on a 128-bit hash of their Key, which uses far less memory
+	// but would silently merge two different states whose hashes collide (a
+	// chance of about 2^-69 per billion states). Set this to rule that out when
+	// debugging; counts must be the same either way.
+	ExactKeys bool
 }
 
 // Step is one position in a trace: the move that produced State.
