@@ -166,7 +166,7 @@ func TestNondeterministicMovesFailLoudly(t *testing.T) {
 			}
 			return nil
 		})
-		expectPanic(t, "no longer yields move", func() { sys.Explore(Options{Workers: 1}) })
+		expectPanic(t, "no longer yields that move", func() { sys.Explore(Options{Workers: 1}) })
 	})
 }
 
@@ -367,4 +367,94 @@ func TestWorkerPanicIsDeterministicAndUnwraps(t *testing.T) {
 			)
 		}
 	}
+}
+
+// unchecked ignores yield's result, as iterators written without early exit
+// in mind do.
+type unchecked struct{}
+
+func (unchecked) Name() string { return "unchecked" }
+func (unchecked) Moves(c counter) iter.Seq2[string, counter] {
+	return func(yield func(string, counter) bool) {
+		if c.n > 0 {
+			return
+		}
+		for _, d := range []int{1, 2} {
+			c.n = d
+			yield("set", c)
+		}
+	}
+}
+
+func TestReplayDrainsActorsThatIgnoreYield(t *testing.T) {
+	res := New(counter{}).Actor(unchecked{}).Invariant("n != 1", func(c counter) error {
+		if c.n == 1 {
+			return errors.New("n is 1")
+		}
+		return nil
+	}).Explore(Options{Workers: 1})
+	if res.States != 3 || len(res.Violations) != 1 {
+		t.Fatalf("states=%d violations=%d, want 3 and 1", res.States, len(res.Violations))
+	}
+}
+
+func TestReplayMismatchNamesTheStep(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		armed := &atomic.Bool{}
+		sys := New(counter{}).Actor(drifting{armed}).Invariant("n != 3", func(c counter) error {
+			if c.n == 3 {
+				armed.Store(true)
+				return errors.New("n is 3")
+			}
+			return nil
+		})
+		var msg string
+		func() {
+			defer func() { msg = fmt.Sprint(recover()) }()
+			sys.Explore(Options{Workers: 1, ExactKeys: exact})
+		}()
+		for _, want := range []string{`actor "drift"`, `move "add"`, "step 1", "occurrence 0"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("exact=%v: message lacks %q:\n%s", exact, want, msg)
+			}
+		}
+		if exact && !strings.Contains(msg, `line 1: "n=1" vs "n=10"`) {
+			t.Errorf("exact message lacks the key difference:\n%s", msg)
+		}
+	}
+}
+
+// lossy keeps a field Key leaves out, which an armed actor sets differently.
+type lossy struct{ n, hidden int }
+
+func (l lossy) Clone() lossy { return l }
+func (l lossy) Key() string  { return fmt.Sprintf("n=%d", l.n) }
+
+type hiddenWriter struct{ armed *atomic.Bool }
+
+func (hiddenWriter) Name() string { return "hidden" }
+func (h hiddenWriter) Moves(l lossy) iter.Seq2[string, lossy] {
+	return func(yield func(string, lossy) bool) {
+		if l.n < 3 {
+			l.n++
+			if h.armed.Load() {
+				l.hidden = 0
+			} else {
+				l.hidden = 1
+			}
+			yield("add", l)
+		}
+	}
+}
+
+func TestReplayRechecksTheViolatedProperty(t *testing.T) {
+	armed := &atomic.Bool{}
+	sys := New(lossy{}).Actor(hiddenWriter{armed}).Invariant("hidden unset", func(l lossy) error {
+		if l.hidden == 1 && l.n == 3 {
+			armed.Store(true)
+			return errors.New("hidden is set")
+		}
+		return nil
+	})
+	expectPanic(t, "no longer violates", func() { sys.Explore(Options{Workers: 1}) })
 }

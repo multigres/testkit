@@ -95,19 +95,30 @@ func (sys *System[S]) Explore(opts Options) Result[S] {
 		res.Coverage[e.names[l.actor]+"/"+verb(l.move)] += n
 	}
 
-	rp := newReplayer(sys, e.g, e.names)
+	rp := newReplayer(sys, e.g, e.names, e.index.exact)
 	for i, v := range e.invViol {
 		if v != nil {
 			res.Violations = append(res.Violations, Violation[S]{
 				Property: sys.invariants[i].name,
 				Kind:     "invariant",
 				Err:      v.err,
-				Trace:    rp.trace(v.node),
+				Trace: rp.confirm(
+					rp.trace(v.node),
+					func(last S) bool { return sys.invariants[i].ok(last) != nil },
+					sys.invariants[i].name,
+					"no longer violates it",
+				),
 			})
 		}
 	}
 	for i, r := range sys.recoverables {
 		if v := findTrap(e.g, e.names, rp, r.name, allowed[i], i); v != nil {
+			rp.confirm(
+				v.Trace,
+				func(last S) bool { return !r.goal(last) },
+				r.name,
+				"now reaches the goal",
+			)
 			res.Violations = append(res.Violations, *v)
 		}
 	}
