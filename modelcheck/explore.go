@@ -136,9 +136,9 @@ type explorer[S State[S]] struct {
 	// seenStamp[label] == stamp marks a label already yielded by the current
 	// (node, actor); seenN then counts how many times, to number moves that
 	// share a name.
-	seenStamp []uint32
+	seenStamp []uint64
 	seenN     []uint16
-	stamp     uint32
+	stamp     uint64
 }
 
 // succ is a successor produced by a worker, awaiting the ordered merge.

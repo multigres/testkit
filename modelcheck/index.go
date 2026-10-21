@@ -94,11 +94,44 @@ func (ix *keyIndex) grow(hashes []hash128) {
 	}
 }
 
+// workerPanic is what parallelFor re-raises on the calling goroutine when fn
+// panicked or exited its goroutine on a worker. It keeps the original value
+// reachable through Unwrap, and the worker's stack, which the caller's own
+// stack would not show.
+type workerPanic struct {
+	item   int
+	value  any
+	goexit bool
+	stack  string
+}
+
+func (p *workerPanic) Error() string {
+	if p.goexit {
+		return fmt.Sprintf(
+			"modelcheck: while handling item %d, a Moves, Key, Clone, invariant or goal ended its "+
+				"goroutine with runtime.Goexit (t.FailNow, t.Fatal and require.* do this) on an "+
+				"exploration worker, which would silently drop the item: return an error from the "+
+				"property instead, or set Options.Workers to 1\n%s", p.item, p.stack)
+	}
+	return fmt.Sprintf("modelcheck: panic on an exploration worker (item %d): %v\n%s",
+		p.item, p.value, p.stack)
+}
+
+func (p *workerPanic) Unwrap() error {
+	err, _ := p.value.(error)
+	return err
+}
+
 // parallelFor calls fn(worker, i) for every i in [0, n) on up to workers
 // goroutines. fn must be safe to call concurrently and write only to slots
-// owned by i. A panic in fn is re-raised on the calling goroutine with the
-// worker's stack, so a model bug fails the test that ran it instead of
-// killing the process from a goroutine nothing can recover.
+// owned by i. A panic in fn, or fn ending its goroutine without returning, is
+// re-raised on the calling goroutine as a *workerPanic, so a model bug fails
+// the test that ran it instead of killing the process from a goroutine nothing
+// can recover, and is never mistaken for an item that produced nothing.
+//
+// Items are taken in increasing order and no item below the lowest failure so
+// far is skipped, so the failure reported is the lowest-numbered one whatever
+// the scheduling.
 func parallelFor(workers, n int, fn func(worker, i int)) {
 	if workers <= 1 || n <= 1 {
 		for i := range n {
@@ -107,41 +140,52 @@ func parallelFor(workers, n int, fn func(worker, i int)) {
 		return
 	}
 	var (
-		next   atomic.Int64
-		failed atomic.Bool
+		next atomic.Int64
+		// lowest is the lowest failing item so far, n when none.
+		lowest atomic.Int64
 		wg     sync.WaitGroup
 		mu     sync.Mutex
-		first  = -1
-		cause  string
+		fail   *workerPanic
 	)
+	lowest.Store(int64(n))
+	record := func(p *workerPanic) {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail == nil || p.item < fail.item {
+			fail = p
+			lowest.Store(int64(p.item))
+		}
+	}
 	for w := range min(workers, n) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for !failed.Load() {
-				i := int(next.Add(1) - 1)
-				if i >= n {
+			for {
+				i := next.Add(1) - 1
+				if i >= lowest.Load() {
 					return
 				}
+				finished := false
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							mu.Lock()
-							if first < 0 || i < first {
-								first = i
-								cause = fmt.Sprintf("%v\n%s", r, debug.Stack())
-							}
-							mu.Unlock()
-							failed.Store(true)
+							record(&workerPanic{
+								item: int(i), value: r, stack: string(debug.Stack()),
+							})
+						} else if !finished {
+							record(&workerPanic{
+								item: int(i), goexit: true, stack: string(debug.Stack()),
+							})
 						}
 					}()
-					fn(w, i)
+					fn(w, int(i))
+					finished = true
 				}()
 			}
 		}()
 	}
 	wg.Wait()
-	if first >= 0 {
-		panic("modelcheck: panic on an exploration worker: " + cause)
+	if fail != nil {
+		panic(fail)
 	}
 }

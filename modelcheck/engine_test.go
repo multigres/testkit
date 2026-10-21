@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -289,5 +290,81 @@ func TestKeyIndexGrowsAndFindsEveryKey(t *testing.T) {
 	}
 	if _, ok := ix.lookup(hashKey("absent", &buf), "", hashes); ok {
 		t.Error("found a key that was never inserted")
+	}
+}
+
+// goexiter ends its goroutine the way t.FailNow does, at one state.
+type goexiter struct{ at int }
+
+func (goexiter) Name() string { return "goexit" }
+func (g goexiter) Moves(c counter) iter.Seq2[string, counter] {
+	return func(yield func(string, counter) bool) {
+		if c.n == g.at {
+			runtime.Goexit()
+		}
+		if c.n < 20 {
+			c.n++
+			yield("add", c)
+		}
+		if c.n < 20 {
+			c.n++
+			yield("add", c)
+		}
+	}
+}
+
+func TestGoexitOnAWorkerFailsLoudly(t *testing.T) {
+	forcedChunks(t)
+	// Level 5 of the two-step counter holds several states, so the exit
+	// happens on a worker and not inline.
+	sys := New(counter{}).Actor(adder{name: "one", step: 1, limit: 20}).
+		Actor(adder{name: "two", step: 2, limit: 20}).Actor(goexiter{at: 10})
+	expectPanic(t, "runtime.Goexit", func() { sys.Explore(Options{Workers: 4}) })
+}
+
+// panicAbove panics on every state at or above a threshold.
+type panicAbove struct{ n int }
+
+func (panicAbove) Name() string { return "panicAbove" }
+func (p panicAbove) Moves(c counter) iter.Seq2[string, counter] {
+	return func(yield func(string, counter) bool) {
+		if c.n >= p.n {
+			panic(fmt.Errorf("boom at %d", c.n))
+		}
+		c.n++
+		yield("add", c)
+		c.n++
+		yield("add2", c)
+	}
+}
+
+func TestWorkerPanicIsDeterministicAndUnwraps(t *testing.T) {
+	forcedChunks(t)
+	var sentinel *workerPanic
+	for range 20 {
+		func() {
+			defer func() {
+				r := recover()
+				err, ok := r.(error)
+				if !ok || !errors.As(err, &sentinel) {
+					t.Fatalf("panic = %#v, want a *workerPanic", r)
+				}
+				if got := errors.Unwrap(
+					err,
+				); got == nil ||
+					!strings.HasPrefix(got.Error(), "boom at") {
+					t.Errorf("Unwrap = %v, want the original error", got)
+				}
+			}()
+			New(counter{}).Actor(panicAbove{n: 5}).Explore(Options{Workers: 6, MaxStates: 1000})
+		}()
+		// Several states of one level panic; the reported one must always be
+		// the first of them in node order.
+		if !strings.Contains(sentinel.Error(), "boom at 5") {
+			t.Fatalf(
+				"reported %v, want the lowest panicking node (state 5; 6 panics too)",
+				sentinel,
+			)
+		}
 	}
 }

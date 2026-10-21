@@ -10,6 +10,13 @@ import (
 
 // State is a model state. A state is an ordinary Go value that may hold
 // protos or other mutable data; the engine never mutates one it has stored.
+//
+// Clone and Key (like Actor.Moves and the properties) are called from several
+// goroutines at once unless Options.Workers is 1. Different states may share
+// data copy-on-write, so any memoization, on a state or on data shared between
+// states, must be filled in eagerly or synchronized (sync.Once, atomics).
+// None of them may end the goroutine they run on (t.FailNow, t.Fatal,
+// require.*): that is detected and reported as a panic, but cannot be resumed.
 type State[S any] interface {
 	// Clone returns a deep copy that shares no mutable data with the receiver.
 	Clone() S
@@ -104,7 +111,9 @@ func (at attached[S, C]) Moves(s S) iter.Seq2[string, S] {
 }
 
 // Invariant requires ok to return nil in every reachable state. Only the
-// shallowest violating state is reported.
+// shallowest violating state is reported. ok is pure and may run on several
+// goroutines at once (see State); return an error rather than calling
+// t.FailNow, which would end an exploration worker.
 func (sys *System[S]) Invariant(name string, ok func(S) error) *System[S] {
 	sys.invariants = append(sys.invariants, invariant[S]{name: name, ok: ok})
 	return sys
@@ -115,7 +124,8 @@ func (sys *System[S]) Invariant(name string, ok func(S) error) *System[S] {
 // named, all registered actors count. A state with no such path is a trap, so
 // naming only the actors that are expected to do the recovering checks that the
 // system does not depend on anything else going right. Explore panics if a
-// named actor is not registered.
+// named actor is not registered. goal is pure and may run on several
+// goroutines at once (see State); it must not call t.FailNow.
 func (sys *System[S]) Recoverable(name string, goal func(S) bool, actors ...string) *System[S] {
 	sys.recoverables = append(
 		sys.recoverables,
@@ -131,7 +141,11 @@ type Options struct {
 
 	// Workers is how many goroutines expand states concurrently. 0 means
 	// runtime.GOMAXPROCS(0). Results are identical for every value; 1 runs
-	// everything on the calling goroutine.
+	// everything on the calling goroutine. With more than one, Moves, Clone,
+	// Key and the properties run on several goroutines at once, so existing
+	// models become concurrent by default: memoization on states, including
+	// data shared copy-on-write between them, must be eager or synchronized,
+	// and none of them may call t.FailNow (see State). Use 1 to debug.
 	Workers int
 
 	// ExactKeys deduplicates on the full Key string. By default states are
