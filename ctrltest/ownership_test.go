@@ -69,11 +69,15 @@ func TestC_OwnershipAssertionsFail(t *testing.T) {
 			[]string{"ns/p", `"alpha", "beta"`},
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(name+"/Require", func(t *testing.T) {
 			r := &recorder{}
-			tc.call(Bare(r))
-			if len(r.fatals) != 1 {
-				t.Fatalf("fatals = %q, want exactly one", r.fatals)
+			tc.call(Bare(r).Require())
+			if len(r.fatals) != 1 || len(r.errors) != 0 {
+				t.Fatalf(
+					"fatals = %q, errors = %q, want one fatal and no errors",
+					r.fatals,
+					r.errors,
+				)
 			}
 			for _, w := range tc.want {
 				if !strings.Contains(r.fatals[0], w) {
@@ -81,18 +85,52 @@ func TestC_OwnershipAssertionsFail(t *testing.T) {
 				}
 			}
 		})
+		t.Run(name+"/Check", func(t *testing.T) {
+			r := &recorder{}
+			tc.call(Bare(r).Check())
+			if len(r.errors) != 1 || len(r.fatals) != 0 {
+				t.Fatalf(
+					"fatals = %q, errors = %q, want one error and no fatals",
+					r.fatals,
+					r.errors,
+				)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(r.errors[0], w) {
+					t.Errorf("message %q lacks %q", r.errors[0], w)
+				}
+			}
+		})
 	}
 }
 
+// The recorder's Fatalf returns instead of exiting the goroutine, as it does
+// in every collecting-mode case, so reaching Owners after a failed decode
+// would panic here. Each call must stop at the decode failure on its own.
 func TestC_OwnershipRefusesUndecodableManagedFields(t *testing.T) {
-	p := ownedPod()
-	p.ManagedFields[0].FieldsV1.SetRawString(`{not json`)
-	r := &recorder{}
-	func() {
-		defer func() { _ = recover() }()
-		Bare(r).NotOwned(p, ".metadata.labels.a")
-	}()
-	if len(r.fatals) == 0 {
-		t.Fatal("NotOwned passed on managedFields it could not decode")
+	calls := map[string]func(*C, *corev1.Pod){
+		"OwnedBy":   func(c *C, p *corev1.Pod) { c.OwnedBy(p, "alpha", ".metadata.labels.a") },
+		"NotOwned":  func(c *C, p *corev1.Pod) { c.NotOwned(p, ".metadata.labels.a") },
+		"NoManager": func(c *C, p *corev1.Pod) { c.NoManager(p, "gamma") },
+	}
+	for name, call := range calls {
+		for mode, view := range map[string]func(*C) *C{
+			"Require": (*C).Require,
+			"Check":   (*C).Check,
+		} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				p := ownedPod()
+				p.ManagedFields[0].FieldsV1.SetRawString(`{not json`)
+				r := &recorder{}
+				call(view(Bare(r)), p)
+				if len(r.fatals)+len(r.errors) != 1 {
+					t.Fatalf(
+						"fatals = %q, errors = %q, want exactly one failure",
+						r.fatals,
+						r.errors,
+					)
+				}
+			})
+		}
 	}
 }
