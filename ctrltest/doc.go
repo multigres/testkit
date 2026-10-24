@@ -92,6 +92,17 @@
 // what it does not get is namespace gating, requeue compression, and the
 // reconcile records that say a controller ran and decided to do nothing.
 //
+// # The gate has a pause
+//
+// Interceptor.Deactivate drops the requests it refuses, so re-activating a
+// namespace wakes no controller until something touches its objects.
+// Interceptor.Pause is the other promise: refused requests return
+// RequeueAfter: PauseRetry and keep retrying, so Activate resumes the
+// controllers with no object write. Pause does not wait for reconciles already
+// admitted; Pause followed by RequireQuiescent is the drain, sound because
+// retries refused during a pause record only gated reconciles and write
+// nothing.
+//
 // # The consumer owns the suite variable
 //
 // This package declares none. Boot returns a *Suite and a teardown func, and

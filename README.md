@@ -2,7 +2,7 @@
 
 Go testing packages for the Multigres projects.
 
-Three packages, one module:
+Six packages, one module:
 
 - **`assert`** is a typed assertion vocabulary for ordinary unit tests. No
   Kubernetes, no controller-runtime; stdlib and `go-cmp` only.
@@ -13,6 +13,14 @@ Three packages, one module:
 - **`ctrltest`** is a multi-controller test harness built on `envtest`: write
   attribution per controller, reconcile interception, a closed-world step
   script, quiescence detection and a core-kind data plane simulator.
+- **`modelcheck`** is an explicit-state model checker whose models call real
+  implementation code: invariants over every reachable state, and recoverable
+  goals that must stay reachable from all of them.
+- **`managedfields`** decodes `metadata.managedFields` from objects read off a
+  real API server, and drives that server to record the ownership a test
+  needs. See [below](#managedfields).
+- **`etcdsim`** is an in-memory multi-member etcd cluster for testing code that
+  makes etcd maintenance calls. See [below](#etcdsim).
 
 They ship together because `ctrltest` hangs its own vocabulary on the same
 receiver `assert` provides, so a test says `c.Eq(...)` and `c.Get(key, obj)`
@@ -80,6 +88,28 @@ makes all of that assertable.
   act as the garbage collector over `Options.WatchedKinds`, cascading a delete
   and honouring the `foregroundDeletion` and `orphan` finalizers, which
   envtest otherwise leaves for a consumer to work around by hand.
+- **Pausing a namespace.** `Suite.Reconciles.Pause(ns)` stops admitting
+  reconciles for `ns` and makes each refused request return
+  `RequeueAfter: PauseRetry` (100ms), so the controller's own queue keeps it
+  alive. `Activate(ns)` ends the pause and the next retry is admitted with no
+  object write needed to wake it. A plain `Deactivate` is not a pause: it
+  drops the refused requests, so re-activating wakes nothing until something
+  else touches the objects, and it also clears a pause. Use `Pause` when a
+  test must edit objects while no controller acts on them and then have the
+  controllers pick them up again. `Pause` does not wait for reconciles already
+  admitted; call `Pause(ns)` and then `RequireQuiescent` to drain them, which
+  is sound because retries refused during a pause record only gated
+  reconciles and write nothing. `Paused(ns)` reports the state.
+- **Ownership assertions.** `c.OwnedBy(obj, manager, path)`,
+  `c.NotOwned(obj, path)` and `c.NoManager(obj, names...)` check an object you
+  already fetched against its `managedFields`, on any subresource. Paths are
+  exact fieldpath strings, so a manager owning `.spec.template` does not own
+  `.spec.template.metadata`.
+- **A patch the API server rejects.** `ctrltest.InvalidPatch(match, times)`
+  returns `interceptor.Funcs` whose `Patch` fails, for objects `match`
+  accepts, with the 422 Invalid the real server returns for a failed JSON
+  patch `test` op (a stale `resourceVersion` cannot be forced on demand).
+  `times <= 0` means always. It fails `Patch` only, not status patches.
 - **Failures that come with evidence.** Every `Case` attaches a failure dump:
   the op log around the failing assertion, interleaved with the reconcile
   passes that produced it and with other controllers' writes out of scope. A
@@ -105,6 +135,61 @@ sc.Finish(time.Second)
 
 If either step also caused anything else, such as a status write nobody
 declared, the step fails and names the event.
+
+## `managedfields`
+
+Decodes and manipulates `metadata.managedFields` of real objects on a real API
+server. It does not simulate field ownership, because that is computed by the
+server's structured-merge-diff machinery and a model of it would encode the
+test author's belief rather than its behaviour.
+
+- `Entries(obj)` decodes every entry into manager, subresource, operation and
+  sorted field paths; `Managers(obj)` and `Owners(obj, path)` are sorted
+  views over it. `Owners` panics if the field sets cannot be decoded, so an
+  unreadable object cannot pass an absence assertion.
+- `Seed(ctx, c, obj, manager, opts...)` server-side applies `obj`'s content
+  under `manager` with forced ownership, so the object gains an Apply entry
+  for it. Pass `OnStatus()` to apply to the status subresource. It applies a
+  copy and leaves `obj` untouched.
+- `RenameManager(ctx, c, obj, from, to)` renames the matching entries with one
+  JSON patch guarded by the object's `resourceVersion`. A stale `obj` fails
+  the patch, and so does a `from` that matches nothing; re-read and retry.
+
+It takes a `client.Client` and does not import `ctrltest`, so it works against
+any envtest, not only `ctrltest.Suite`.
+
+## `etcdsim`
+
+An in-memory model of a multi-member etcd cluster, shaped to the calls the
+multigres-operator makes against a TopoServer: `Status`, `Members`, `Health`,
+`MoveLeader` and `Defragment`. A real etcd under envtest is single-node, so
+the conditions that make the maintenance flow refuse cannot be produced there.
+A `Cluster` can reproduce:
+
+- a missing member (`RemoveMember`) and a learner member (`Member.Learner`);
+- members that disagree on the leader (`SplitLeaderView`);
+- an etcd alarm (`SetAlarm`), reported as an error from `Status`;
+- an unhealthy member (`SetHealthy`), which fails `Health` and `Defragment`
+  but not `Status`;
+- a leadership transfer that does not take effect (`StallLeaderMove`);
+- database size and live data (`SetDBSize`; `NewHealthy` and `NewHealthyAt`
+  start every member at `DefaultDBSize` and `DefaultInUse`), with
+  `Defragment` shrinking a member to its in-use size;
+- a one-shot failure of any call (`FailNext`), and a change made in the middle
+  of a caller's step (`Hook`).
+
+`MoveLeader` is refused unless sent to the current leader's endpoint, as real
+etcd requires. `DefragLog` and `MoveLeaderLog` record accepted calls. There is
+no raft, no quorum and no time.
+
+`etcdsim.Client` is a copy of the operator's unexported maintenance interface,
+so `Cluster.Client()` satisfies the operator's interface structurally and
+testkit never imports the operator. The consumer hands it to its reconciler
+through its own factory seam, with endpoints exactly as the reconciler will
+pass them (`NewHealthyAt`).
+
+It adds `go.etcd.io/etcd/api/v3` and `go.etcd.io/etcd/client/v3` to `go.mod`,
+which must stay at the versions the operator pins.
 
 ## Versioning
 

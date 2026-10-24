@@ -76,8 +76,8 @@ equality, and `IsType`/`Implements`.
 ## Commits and pull requests
 
 - **Conventional Commits**: `type(scope): lowercase imperative subject`, where
-  scope is the package (`assert`, `ctrltest`, `golden`, `assertfix`, `ci`,
-  `deps`).
+  scope is the package (`assert`, `ctrltest`, `golden`, `managedfields`,
+  `etcdsim`, `assertfix`, `ci`, `deps`).
 - **Sign off every commit**: `git commit -s`. The DCO check is required and a
   missing sign-off blocks the merge. The signer must be the author.
 - Branches are `type/description`, matching the Conventional Commits types.
