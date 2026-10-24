@@ -377,8 +377,17 @@ func (s *Suite) TryQuiescentEvenIfUnwired(t TB, ns string, quiet, timeout time.D
 // and a test asserting against a namespace its controllers were never wired
 // to.
 func (s *Suite) vacuous(ns string) error {
-	if s.Reconciles == nil || len(s.Reconciles.InNamespace(ns)) > 0 {
+	if s.Reconciles == nil {
 		return nil
+	}
+	// A gated record only says the gate refused a request, not that a
+	// controller ever ran. Pause makes that the normal state of a namespace
+	// edited before its first pass, so counting it would let RequireQuiescent
+	// pass with no controller ever having reconciled there.
+	for _, r := range s.Reconciles.InNamespace(ns) {
+		if !r.Gated {
+			return nil
+		}
 	}
 	return fmt.Errorf(
 		"quiescence over %q is vacuous: no reconcile has ever been recorded "+

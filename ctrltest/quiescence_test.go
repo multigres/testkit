@@ -38,6 +38,27 @@ func TestQuiescenceHoldsOnAQuietNamespace(t *testing.T) {
 	)
 }
 
+// TestQuiescenceIsVacuousWhenOnlyGatedReconcilesExist pins the floor: a
+// namespace paused before any real pass has gated records, and those must not
+// make an unwired namespace read as settled.
+func TestQuiescenceIsVacuousWhenOnlyGatedReconcilesExist(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	ns := shared.Namespace(t)
+	wrapped := shared.Reconciles.Wrap("vacuous-gated", &stubReconciler{})
+	shared.Reconciles.Pause(ns)
+	t.Cleanup(func() { shared.Reconciles.Deactivate(ns) })
+
+	_, err := wrapped.Reconcile(t.Context(), request(ns, "a"))
+	c.NoError(err, "Reconcile while paused")
+	c.Eq(1, len(shared.Reconciles.InNamespace(ns)), "gated records in ns")
+	c.True(shared.Reconciles.InNamespace(ns)[0].Gated, "the record is gated")
+
+	err = shared.TryQuiescent(t, ns, 200*time.Millisecond, 15*time.Second)
+	c.Require().Error(err, "TryQuiescent over a namespace with only gated records")
+	c.ErrorContains(err, "vacuous", "the report names the floor")
+}
+
 // TestQuiescenceFailsOnAChangingObject exercises the state half on its own. The
 // writer is the suite's bare client rather than a recorded one, so the recorder
 // never sees this loop and only the event stream can catch it.
