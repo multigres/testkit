@@ -147,7 +147,7 @@ func Seed(
 	if err != nil {
 		return fmt.Errorf("seed %s: %w", describe(obj), err)
 	}
-	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj.DeepCopyObject())
+	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
 		return fmt.Errorf("seed %s: convert to unstructured: %w", describe(obj), err)
 	}

@@ -165,6 +165,17 @@ func TestEntriesSortingIsIndependentOfInputOrder(t *testing.T) {
 	if !slices.IsSorted(ea[0].Paths) || len(ea[0].Paths) != 2 {
 		t.Errorf("paths not sorted or wrong: %q", ea[0].Paths)
 	}
+	// fieldpath iterates list indices numerically ([9] before [10]) while
+	// string order is the reverse, so this only passes if Entries sorts the
+	// rendered strings itself.
+	idx := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "x", ManagedFields: []metav1.ManagedFieldsEntry{
+			mk("c", "", metav1.ManagedFieldsOperationApply, `{"f:l":{"i:10":{},"i:9":{}}}`),
+		}},
+	}
+	if got := mustEntries(t, idx)[0].Paths; !slices.Equal(got, []string{".l[10]", ".l[9]"}) {
+		t.Errorf("paths = %q, want string order", got)
+	}
 	if m := managedfields.Managers(b); !slices.Equal(m, []string{"a", "b"}) {
 		t.Errorf("Managers = %q", m)
 	}
