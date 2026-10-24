@@ -59,6 +59,11 @@ func InvalidPatch(match func(client.Object) bool, times int) interceptor.Funcs {
 			if times > 0 && failed.Add(1) > int64(times) {
 				return c.Patch(ctx, obj, patch, opts...)
 			}
+			// NewGenericServerResponse drops the message argument for a 422
+			// (it is not an unexpected response, so it builds no Cause), and
+			// the real server's text does not reach the client either. The
+			// message below is therefore not observable by callers; assert on
+			// the status reason, not on it.
 			return apierrors.NewGenericServerResponse(
 				http.StatusUnprocessableEntity,
 				"",
