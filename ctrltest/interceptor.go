@@ -248,6 +248,14 @@ func (i *Interceptor) Deactivate(ns string) {
 //
 // Each (controller, request) is recorded as a gated Reconcile once per pause,
 // not once per retry.
+//
+// Pause does not wait for reconciles already admitted: one running, or one that
+// passed the Active check just before Pause took the lock, still reaches the
+// API server afterwards. A test that must edit objects without such a write
+// racing its edit calls Pause(ns) and then waits with RequireQuiescent. That
+// wait is sound because retries refused while paused produce only gated
+// records and no writes, so once the namespace is quiet the in-flight passes
+// have finished and nothing new can start.
 func (i *Interceptor) Pause(ns string) {
 	i.gateMu.Lock()
 	defer i.gateMu.Unlock()

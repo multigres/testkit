@@ -163,11 +163,11 @@ func (s *Suite) Unconverged(ns string) []string {
 	for _, r := range s.Reconciles.InNamespace(ns) {
 		// A gated request is not a pass of the code under test, and it always
 		// carries a nil error, so counting one would let the gate closing
-		// erase a wedge that is still there. No such record can exist while
-		// the test that owns ns is running, since Namespace deactivates only
-		// its own namespace and only in its own cleanup; this guards a caller
-		// outside that window instead, a failure dump or a later diagnostic,
-		// which is reachable because this is exported.
+		// erase a wedge that is still there. Gated records exist mid-test too:
+		// Pause makes every refused retry's first appearance a gated record, so
+		// without this skip the last record for a wedged key would become a
+		// gated entry with no error and a paused wedge would read as converged.
+		// The skip is load-bearing, not defensive.
 		if r.Gated {
 			continue
 		}

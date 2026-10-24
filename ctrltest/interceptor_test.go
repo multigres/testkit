@@ -540,7 +540,7 @@ func TestInterceptorPauseIsPerNamespace(t *testing.T) {
 	c.Eq(time.Duration(0), res.RequeueAfter, "RequeueAfter for an inactive namespace")
 }
 
-func TestInterceptorDeactivateClearsPause(t *testing.T) {
+func TestInterceptorPauseClearedByDeactivate(t *testing.T) {
 	c := assert.NewCollecting(t)
 
 	stub := &stubReconciler{}
@@ -590,4 +590,16 @@ func TestInterceptorPauseConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestInterceptorRefuseAdmitsAfterActivate(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	ic := NewInterceptor(nil, RequeueClamp)
+	ic.Pause("ns1")
+	ic.Activate("ns1")
+
+	_, record, admitted := ic.refuse("shard", request("ns1", "a"))
+	c.True(admitted, "refuse admitted a request activated after the caller's Active check")
+	c.False(record, "refuse recorded an admitted request as gated")
 }
