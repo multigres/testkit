@@ -66,38 +66,105 @@ type Cluster struct {
 	hooks         map[string][]func(string)
 }
 
+// DefaultDBSize and DefaultInUse are the database size and live data every
+// member of NewHealthy and NewHealthyAt starts with. They are a choice, not a
+// measurement: the operator's maintenance flow only picks a defragmentation
+// target whose reclaimable bytes (size minus in-use) reach its
+// minimumReclaimBytes and at least 30% of the size, and a default that never
+// reaches that would make every sim-backed maintenance test sit idle without
+// ever defragmenting. 256 MiB with 64 MiB live leaves 192 MiB, 75%, reclaimable.
+// A test that wants a member below the threshold calls SetDBSize.
+const (
+	DefaultDBSize int64 = 256 << 20
+	DefaultInUse  int64 = 64 << 20
+)
+
 // New returns a cluster of the given members. The first member is the
-// initial leader.
+// initial leader. A member's in-use size starts at half its DBSize; SetDBSize
+// changes both.
+//
+// New panics on a duplicate Name, Endpoint or ID, and when the first member is
+// a learner: lookups by endpoint and ID would otherwise depend on map order,
+// and real etcd cannot elect a learner. A test bug should be loud.
 func New(members ...Member) *Cluster {
 	c := &Cluster{
 		members:  make(map[string]*member, len(members)),
 		failNext: make(map[string][]error),
 		hooks:    make(map[string][]func(string)),
 	}
+	names := map[string]struct{}{}
+	endpoints := map[string]struct{}{}
+	ids := map[uint64]struct{}{}
 	for i, m := range members {
-		m.Alarms = append([]string(nil), m.Alarms...)
-		c.members[m.Name] = &member{Member: m, inUse: m.DBSize / 2}
+		if _, dup := names[m.Name]; dup {
+			panic(fmt.Sprintf("etcdsim: duplicate member name %q", m.Name))
+		}
+		if _, dup := endpoints[m.Endpoint]; dup {
+			panic(fmt.Sprintf("etcdsim: duplicate member endpoint %q", m.Endpoint))
+		}
+		if _, dup := ids[m.ID]; dup {
+			panic(fmt.Sprintf("etcdsim: duplicate member id %d", m.ID))
+		}
+		names[m.Name] = struct{}{}
+		endpoints[m.Endpoint] = struct{}{}
+		ids[m.ID] = struct{}{}
 		if i == 0 {
+			if m.Learner {
+				panic(fmt.Sprintf(
+					"etcdsim: first member %q is the initial leader and cannot be a learner",
+					m.Name,
+				))
+			}
 			c.leader = m.ID
 		}
+		m.Alarms = append([]string(nil), m.Alarms...)
+		c.members[m.Name] = &member{Member: m, inUse: m.DBSize / 2}
 	}
 	return c
 }
 
 // NewHealthy returns n healthy members etcd-0..etcd-(n-1) with endpoints
-// "etcd-<i>:2379" and a 1 MiB database each. etcd-0 leads.
+// "etcd-<i>:2379". See NewHealthyAt.
 func NewHealthy(n int) *Cluster {
-	members := make([]Member, n)
-	for i := range members {
+	endpoints := make([]string, n)
+	for i := range endpoints {
+		endpoints[i] = fmt.Sprintf("etcd-%d:2379", i)
+	}
+	return NewHealthyAt(endpoints...)
+}
+
+// NewHealthyAt returns one healthy member per endpoint, named etcd-0.. and
+// numbered 1.. in the order given, so the first endpoint is the leader. The
+// endpoint strings must be exactly what the caller passes to Status, Health,
+// MoveLeader and Defragment; the operator derives them from the TopoServer, so
+// a consumer passes those rather than the sim's own naming. Every member
+// starts with DefaultDBSize and DefaultInUse.
+func NewHealthyAt(endpoints ...string) *Cluster {
+	members := make([]Member, len(endpoints))
+	for i, ep := range endpoints {
 		members[i] = Member{
 			ID:       uint64(i + 1),
 			Name:     fmt.Sprintf("etcd-%d", i),
-			Endpoint: fmt.Sprintf("etcd-%d:2379", i),
+			Endpoint: ep,
 			Healthy:  true,
-			DBSize:   1 << 20,
+			DBSize:   DefaultDBSize,
 		}
 	}
-	return New(members...)
+	c := New(members...)
+	for _, m := range c.members {
+		m.inUse = DefaultInUse
+	}
+	return c
+}
+
+// SetDBSize sets the named member's database size and the live data inside it.
+// Reclaimable space is size minus inUse.
+func (c *Cluster) SetDBSize(name string, size, inUse int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.mustMember(name)
+	m.DBSize = size
+	m.inUse = inUse
 }
 
 // Client returns a Client viewing this cluster. Each call returns an
@@ -369,8 +436,15 @@ func (cl *client) MoveLeader(ctx context.Context, endpoint string, id uint64) er
 		return err
 	}
 	defer c.mu.Unlock()
-	if _, err := c.byEndpoint(endpoint); err != nil {
+	m, err := c.byEndpoint(endpoint)
+	if err != nil {
 		return err
+	}
+	if m.ID != c.leader {
+		return fmt.Errorf(
+			"etcdsim: move leader sent to %s (id %d), which is not the leader (id %d)",
+			m.Name, m.ID, c.leader,
+		)
 	}
 	var target *member
 	for _, m := range c.members {
@@ -407,7 +481,7 @@ func (cl *client) Defragment(ctx context.Context, endpoint string) error {
 	if !m.Healthy {
 		return fmt.Errorf("etcdsim: member %s is unhealthy", m.Name)
 	}
-	m.DBSize = max(m.DBSize/2, 1)
+	m.DBSize = max(m.inUse, 1)
 	c.defragLog = append(c.defragLog, endpoint)
 	return nil
 }

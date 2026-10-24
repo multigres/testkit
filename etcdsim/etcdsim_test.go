@@ -30,22 +30,22 @@ func TestDefragShrinksAndLogs(t *testing.T) {
 	if err := cl.Defragment(bg, "etcd-1:2379"); err != nil {
 		t.Fatal(err)
 	}
-	if got := c.DBSize("etcd-1"); got != 1<<19 {
-		t.Fatalf("etcd-1 size = %d, want %d", got, 1<<19)
+	if got := c.DBSize("etcd-1"); got != DefaultInUse {
+		t.Fatalf("etcd-1 size = %d, want %d", got, DefaultInUse)
 	}
-	if got := c.DBSize("etcd-0"); got != 1<<20 {
+	if got := c.DBSize("etcd-0"); got != DefaultDBSize {
 		t.Fatalf("etcd-0 size = %d, want untouched", got)
 	}
 	if got := c.DefragLog(); !reflect.DeepEqual(got, []string{"etcd-1:2379"}) {
 		t.Fatalf("DefragLog = %v", got)
 	}
 	s, _ := cl.Status(bg, "etcd-1:2379")
-	if s.DbSize != 1<<19 || s.DbSizeInUse != 1<<19 {
+	if s.DbSize != DefaultInUse || s.DbSizeInUse != DefaultInUse {
 		t.Fatalf(
 			"after defrag size=%d inUse=%d, want both %d (nothing reclaimable)",
 			s.DbSize,
 			s.DbSizeInUse,
-			1<<19,
+			DefaultInUse,
 		)
 	}
 }
@@ -79,7 +79,7 @@ func TestDefragUnhealthyErrorsAndLogsNothing(t *testing.T) {
 	if got := c.DefragLog(); len(got) != 0 {
 		t.Fatalf("DefragLog = %v, want empty", got)
 	}
-	if got := c.DBSize("etcd-2"); got != 1<<20 {
+	if got := c.DBSize("etcd-2"); got != DefaultDBSize {
 		t.Fatalf("size changed to %d", got)
 	}
 }
@@ -183,9 +183,8 @@ func TestStatusFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Header.MemberId != 3 || s.Header.ClusterId == 0 || s.Leader != 1 || s.DbSize != 1<<20 ||
-		s.IsLearner ||
-		len(s.Errors) != 0 {
+	if s.Header.MemberId != 3 || s.Header.ClusterId == 0 || s.Leader != 1 ||
+		s.DbSize != DefaultDBSize || s.IsLearner || len(s.Errors) != 0 {
 		t.Fatalf("unexpected status %+v", s)
 	}
 	s0, _ := c.Client().Status(bg, "etcd-0:2379")
@@ -311,7 +310,7 @@ func TestFailNextDoesNotApplyTheEffect(t *testing.T) {
 	c := NewHealthy(2)
 	c.FailNext("Defragment", errors.New("boom"))
 	_ = c.Client().Defragment(bg, "etcd-0:2379")
-	if len(c.DefragLog()) != 0 || c.DBSize("etcd-0") != 1<<20 {
+	if len(c.DefragLog()) != 0 || c.DBSize("etcd-0") != DefaultDBSize {
 		t.Fatal("failed call had an effect")
 	}
 }
@@ -347,7 +346,7 @@ func TestHookRunsBeforeEffectAndSeesEndpoint(t *testing.T) {
 	if !reflect.DeepEqual(seen, []string{"etcd-1:2379"}) {
 		t.Fatalf("seen = %v", seen)
 	}
-	if sizeInHook != 1<<20 {
+	if sizeInHook != DefaultDBSize {
 		t.Fatalf("hook saw size %d, want the pre-effect size", sizeInHook)
 	}
 }
@@ -502,5 +501,117 @@ func TestUnknownNamesPanic(t *testing.T) {
 			}()
 			fn()
 		}()
+	}
+}
+
+func TestNewHealthyAtUsesTheGivenEndpoints(t *testing.T) {
+	eps := []string{"ts-0.h.ns.svc:2379", "ts-1.h.ns.svc:2379", "ts-2.h.ns.svc:2379"}
+	c := NewHealthyAt(eps...)
+	cl := c.Client()
+	for i, ep := range eps {
+		s, err := cl.Status(bg, ep)
+		if err != nil {
+			t.Fatalf("Status(%s): %v", ep, err)
+		}
+		if s.Header.MemberId != uint64(i+1) || s.Leader != 1 {
+			t.Fatalf("Status(%s) member=%d leader=%d", ep, s.Header.MemberId, s.Leader)
+		}
+	}
+	if _, err := cl.Status(bg, "etcd-0:2379"); err == nil {
+		t.Fatal("the default endpoint must not exist when endpoints were given")
+	}
+}
+
+func TestNewHealthyDefaultsAreReclaimable(t *testing.T) {
+	s, err := NewHealthy(1).Client().Status(bg, "etcd-0:2379")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator's minimumReclaimBytes is 100 MiB and its minimum free ratio
+	// is 0.3; the defaults must clear both or no test ever defragments.
+	free := s.DbSize - s.DbSizeInUse
+	if free < 100<<20 || float64(free)/float64(s.DbSize) < 0.3 {
+		t.Fatalf(
+			"size=%d inUse=%d: not reclaimable by the operator's rule",
+			s.DbSize,
+			s.DbSizeInUse,
+		)
+	}
+}
+
+func TestSetDBSizeSetsSizeAndInUse(t *testing.T) {
+	c := NewHealthy(2)
+	c.SetDBSize("etcd-1", 1000, 10)
+	s, err := c.Client().Status(bg, "etcd-1:2379")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.DbSize != 1000 || s.DbSizeInUse != 10 {
+		t.Fatalf("size=%d inUse=%d, want 1000 and 10", s.DbSize, s.DbSizeInUse)
+	}
+}
+
+func TestMoveLeaderRequiresTheLeaderEndpoint(t *testing.T) {
+	c := NewHealthy(3)
+	cl := c.Client()
+	if err := cl.MoveLeader(bg, "etcd-1:2379", 3); err == nil {
+		t.Fatal("MoveLeader sent to a follower: want error")
+	}
+	if c.Leader() != 1 || len(c.MoveLeaderLog()) != 0 {
+		t.Fatalf("refused move had an effect: leader=%d log=%v", c.Leader(), c.MoveLeaderLog())
+	}
+	if err := cl.MoveLeader(bg, "etcd-0:2379", 3); err != nil {
+		t.Fatalf("MoveLeader to the leader's endpoint: %v", err)
+	}
+	if err := cl.MoveLeader(bg, "etcd-0:2379", 2); err == nil {
+		t.Fatal("the old leader's endpoint must be refused after the move")
+	}
+}
+
+func TestNewPanicsOnInvalidMembers(t *testing.T) {
+	ok := func(id uint64, name, ep string) Member {
+		return Member{ID: id, Name: name, Endpoint: ep, Healthy: true}
+	}
+	tests := map[string][]Member{
+		"duplicate name":     {ok(1, "a", "x"), ok(2, "a", "y")},
+		"duplicate endpoint": {ok(1, "a", "x"), ok(2, "b", "x")},
+		"duplicate id":       {ok(1, "a", "x"), ok(1, "b", "y")},
+		"learner leader": {
+			{ID: 1, Name: "a", Endpoint: "x", Healthy: true, Learner: true},
+			ok(2, "b", "y"),
+		},
+	}
+	for name, members := range tests {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("New did not panic")
+				}
+			}()
+			New(members...)
+		})
+	}
+}
+
+func TestSecondDefragmentDoesNotGoBelowInUse(t *testing.T) {
+	c := NewHealthy(1)
+	cl := c.Client()
+	// Three passes: halving would land exactly on DefaultInUse after two.
+	for range 3 {
+		if err := cl.Defragment(bg, "etcd-0:2379"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := cl.Status(bg, "etcd-0:2379")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.DbSize != DefaultInUse || s.DbSizeInUse != DefaultInUse {
+		t.Fatalf(
+			"size=%d inUse=%d after three defrags, want both %d",
+			s.DbSize,
+			s.DbSizeInUse,
+			DefaultInUse,
+		)
 	}
 }
