@@ -98,10 +98,18 @@
 // namespace wakes no controller until something touches its objects.
 // Interceptor.Pause is the other promise: refused requests return
 // RequeueAfter: PauseRetry and keep retrying, so Activate resumes the
-// controllers with no object write. Pause does not wait for reconciles already
-// admitted; Pause followed by RequireQuiescent is the drain, sound because
-// retries refused during a pause record only gated reconciles and write
-// nothing.
+// controllers with no object write. Activate wakes only requests already
+// queued during the pause and enqueues nothing, so an object edit that a
+// controller's event predicates filter out (a managedFields-only change, for
+// example) wakes nothing and needs a nudge the predicates admit.
+//
+// Pause does not wait for reconciles already admitted. Pause followed by
+// RequireQuiescent narrows that window without closing it: quiescence measures
+// watch events and the writes of completed passes only, so a pass admitted just
+// before Pause that stays silent for longer than the quiet window can still
+// write afterwards. A test can rely on nothing new starting after Pause and on
+// any pass that writes within the quiet window having finished, not on every
+// earlier pass being done.
 //
 // # The consumer owns the suite variable
 //

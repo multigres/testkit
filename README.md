@@ -96,10 +96,20 @@ makes all of that assertable.
   drops the refused requests, so re-activating wakes nothing until something
   else touches the objects, and it also clears a pause. Use `Pause` when a
   test must edit objects while no controller acts on them and then have the
-  controllers pick them up again. `Pause` does not wait for reconciles already
-  admitted; call `Pause(ns)` and then `RequireQuiescent` to drain them, which
-  is sound because retries refused during a pause record only gated
-  reconciles and write nothing. `Paused(ns)` reports the state.
+  controllers pick them up again. `Activate` wakes only requests already
+  queued during the pause and enqueues nothing, so an edit that a controller's
+  event predicates filter out (a `managedFields`-only change, for example)
+  wakes nothing; nudge the object with an edit the predicates admit. `Pause`
+  does not wait for reconciles already admitted. `Pause(ns)` followed by
+  `RequireQuiescent` narrows that window without closing it: quiescence
+  measures watch events and the writes of completed passes only, so a pass
+  admitted just before `Pause` that stays silent for longer than the quiet
+  window can still write afterwards. A test can rely on nothing new starting
+  after `Pause` and on any pass that writes within the quiet window having
+  finished, not on every earlier pass being done. A pause ends with `Activate`
+  or `Deactivate`; `Suite.Namespace` registers `Deactivate` as cleanup, but a
+  namespace it does not own (`""`, say) must be ended by the caller.
+  `Paused(ns)` reports the state.
 - **Ownership assertions.** `c.OwnedBy(obj, manager, path)`,
   `c.NotOwned(obj, path)` and `c.NoManager(obj, names...)` check an object you
   already fetched against its `managedFields`, on any subresource. Paths are

@@ -246,16 +246,32 @@ func (i *Interceptor) Deactivate(ns string) {
 // Deactivate the refused requests are dropped, and re-activating wakes nothing
 // until something else touches the objects.
 //
+// Activate wakes only requests that were already queued during the pause: it
+// enqueues nothing itself. An object edit that an event predicate filters out
+// (for example a change to managedFields alone) queues no request, so nothing
+// is waiting to be woken. After such an edit the test must nudge the object
+// with an edit the controller's predicates admit.
+//
 // Each (controller, request) is recorded as a gated Reconcile once per pause,
 // not once per retry.
 //
 // Pause does not wait for reconciles already admitted: one running, or one that
 // passed the Active check just before Pause took the lock, still reaches the
-// API server afterwards. A test that must edit objects without such a write
-// racing its edit calls Pause(ns) and then waits with RequireQuiescent. That
-// wait is sound because retries refused while paused produce only gated
-// records and no writes, so once the namespace is quiet the in-flight passes
-// have finished and nothing new can start.
+// API server afterwards. Pause(ns) followed by RequireQuiescent narrows that
+// window but does not close it. Retries refused while paused produce only
+// gated records and no writes, so the namespace goes quiet once the admitted
+// passes have written. Quiescence, though, sees watch events and the writes of
+// completed passes only; it keeps no count of passes still running. A pass
+// admitted just before Pause that stays silent for longer than the quiet window
+// and writes afterwards is not seen, and its write can land after
+// RequireQuiescent returned. A test can rely on this: nothing admitted after
+// Pause starts, and a pass that writes within the quiet window has finished. It
+// cannot rely on every earlier pass being finished.
+//
+// A pause ends with Activate or Deactivate for the namespace. Suite.Namespace
+// registers Deactivate as cleanup; a namespace no Suite.Namespace owns, such as
+// "", must be ended by the caller or its refused requests retry until the
+// process exits.
 func (i *Interceptor) Pause(ns string) {
 	i.gateMu.Lock()
 	defer i.gateMu.Unlock()
