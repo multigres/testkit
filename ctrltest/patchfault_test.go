@@ -4,6 +4,8 @@ package ctrltest
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -33,7 +35,7 @@ func cmKey(name string) client.ObjectKey {
 	return client.ObjectKey{Namespace: "ns", Name: name}
 }
 
-func labelPatch(t *testing.T, c client.Client, name string) error {
+func dataPatch(t *testing.T, c client.Client, name string) error {
 	t.Helper()
 	obj := cm(name)
 	return c.Patch(context.Background(), obj, client.RawPatch(
@@ -46,9 +48,22 @@ func matchName(name string) func(client.Object) bool {
 
 func TestInvalidPatchFailsMatchingWithInvalid(t *testing.T) {
 	c := invalidPatchClient(t, InvalidPatch(matchName("a"), 0), cm("a"))
-	err := labelPatch(t, c, "a")
+	err := dataPatch(t, c, "a")
 	if !apierrors.IsInvalid(err) {
 		t.Fatalf("want IsInvalid, got %v", err)
+	}
+	// Shape recorded from envtest for a failing JSON-patch test op: 422
+	// Invalid with empty Details.
+	var se *apierrors.StatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("want a StatusError, got %T", err)
+	}
+	if se.ErrStatus.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("Code = %d, want 422", se.ErrStatus.Code)
+	}
+	d := se.ErrStatus.Details
+	if d == nil || d.Kind != "" || d.Name != "" || d.Group != "" || len(d.Causes) != 0 {
+		t.Fatalf("Details = %+v, want empty as the apiserver returns", d)
 	}
 	got := &corev1.ConfigMap{}
 	if err := c.Get(context.Background(), cmKey("a"), got); err != nil {
@@ -61,7 +76,7 @@ func TestInvalidPatchFailsMatchingWithInvalid(t *testing.T) {
 
 func TestInvalidPatchPassesNonMatchingThrough(t *testing.T) {
 	c := invalidPatchClient(t, InvalidPatch(matchName("a"), 0), cm("a"), cm("b"))
-	if err := labelPatch(t, c, "b"); err != nil {
+	if err := dataPatch(t, c, "b"); err != nil {
 		t.Fatalf("non-matching patch failed: %v", err)
 	}
 	got := &corev1.ConfigMap{}
@@ -88,17 +103,21 @@ func TestInvalidPatchPassesNonPatchCallsThrough(t *testing.T) {
 	if err := c.Create(ctx, cm("new")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	if err := c.Status().Patch(ctx, cm("a"), client.RawPatch(
+		"application/merge-patch+json", []byte(`{}`))); apierrors.IsInvalid(err) {
+		t.Fatalf("SubResourcePatch was intercepted: %v", err)
+	}
 }
 
 func TestInvalidPatchTimesLimitsFailures(t *testing.T) {
 	c := invalidPatchClient(t, InvalidPatch(matchName("a"), 2), cm("a"))
 	for i := range 2 {
-		if err := labelPatch(t, c, "a"); !apierrors.IsInvalid(err) {
+		if err := dataPatch(t, c, "a"); !apierrors.IsInvalid(err) {
 			t.Fatalf("patch %d: want IsInvalid, got %v", i, err)
 		}
 	}
 	for i := range 3 {
-		if err := labelPatch(t, c, "a"); err != nil {
+		if err := dataPatch(t, c, "a"); err != nil {
 			t.Fatalf("patch %d after limit: %v", i, err)
 		}
 	}
@@ -108,7 +127,7 @@ func TestInvalidPatchNonPositiveTimesAlwaysFails(t *testing.T) {
 	for _, times := range []int{0, -1} {
 		c := invalidPatchClient(t, InvalidPatch(matchName("a"), times), cm("a"))
 		for i := range 5 {
-			if err := labelPatch(t, c, "a"); !apierrors.IsInvalid(err) {
+			if err := dataPatch(t, c, "a"); !apierrors.IsInvalid(err) {
 				t.Fatalf("times=%d patch %d: want IsInvalid, got %v", times, i, err)
 			}
 		}
@@ -125,7 +144,7 @@ func TestInvalidPatchCountsConcurrentCalls(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if apierrors.IsInvalid(labelPatch(t, c, "a")) {
+			if apierrors.IsInvalid(dataPatch(t, c, "a")) {
 				failures.Add(1)
 			}
 		}()

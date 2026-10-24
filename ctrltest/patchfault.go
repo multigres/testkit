@@ -4,19 +4,18 @@ package ctrltest
 
 import (
 	"context"
+	"net/http"
 	"sync/atomic"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// InvalidPatch returns interceptor.Funcs whose Patch fails with the
-// apiserver-shaped 422 Invalid error for every patch of an object match
-// accepts, and passes every other call through unchanged. times > 0 limits it
+// InvalidPatch returns interceptor.Funcs whose Patch fails with the error the
+// apiserver returns for a failed JSON-patch op, for every patch of an object
+// match accepts, and passes every other call through unchanged. times > 0 limits it
 // to that many failures (then it passes through); times <= 0 means always.
 //
 // This fakes the error rather than provoking it. A real stale resourceVersion
@@ -31,6 +30,14 @@ import (
 // patches the main resource with a JSON patch whose test op can fail; a status
 // patch is a different call that no such test op guards, so failing it would
 // exercise a path the apiserver does not produce.
+//
+// The error is built the way the apiserver builds it (k8s.io/apiserver's
+// patch handler calls NewGenericServerResponse with 422 and an empty
+// GroupResource and name), not with NewInvalid. So it satisfies
+// apierrors.IsInvalid but carries no Details (no Kind, Name or Causes) and the
+// generic client-side message, exactly as a controller sees it from envtest. A
+// test that asserted on the object name or a cause would pass against NewInvalid
+// and see nothing against the real server.
 //
 // The failure counter is atomic because concurrent reconciles share one
 // interceptor, and a plain counter would let more than times of them fail.
@@ -52,25 +59,15 @@ func InvalidPatch(match func(client.Object) bool, times int) interceptor.Funcs {
 			if times > 0 && failed.Add(1) > int64(times) {
 				return c.Patch(ctx, obj, patch, opts...)
 			}
-			return apierrors.NewInvalid(
-				groupKind(c, obj),
-				obj.GetName(),
-				field.ErrorList{field.Invalid(
-					field.NewPath("patch"),
-					string(patch.Type()),
-					"the patch test operation failed",
-				)},
+			return apierrors.NewGenericServerResponse(
+				http.StatusUnprocessableEntity,
+				"",
+				schema.GroupResource{},
+				"",
+				"testing value /metadata/resourceVersion failed: test failed",
+				0,
+				false,
 			)
 		},
 	}
-}
-
-// groupKind resolves obj's GroupKind from the client's scheme, then from the
-// object itself, and is empty when neither knows. An empty GroupKind still
-// yields an error that satisfies apierrors.IsInvalid.
-func groupKind(c client.Client, obj client.Object) schema.GroupKind {
-	if gvk, err := apiutil.GVKForObject(obj, c.Scheme()); err == nil {
-		return gvk.GroupKind()
-	}
-	return obj.GetObjectKind().GroupVersionKind().GroupKind()
 }
