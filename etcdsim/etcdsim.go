@@ -16,8 +16,9 @@ import (
 )
 
 // Client is the maintenance surface of an etcd cluster that the operator
-// consumes. It is copied from the operator's unexported interface so that a
-// *Cluster client satisfies it without testkit importing the operator.
+// consumes. It is copied from the operator's exported EtcdMaintenanceClient
+// (toposerver package) so that a *Cluster client satisfies it without testkit
+// importing the operator.
 type Client interface {
 	Status(context.Context, string) (*clientv3.StatusResponse, error)
 	Members(context.Context) (*clientv3.MemberListResponse, error)
@@ -159,7 +160,17 @@ func NewHealthyAt(endpoints ...string) *Cluster {
 
 // SetDBSize sets the named member's database size and the live data inside it.
 // Reclaimable space is size minus inUse.
+//
+// SetDBSize panics unless 0 <= inUse <= size and size >= 1, like the other
+// guards against a test bug: an inUse above size would let Defragment grow the
+// database, which real etcd never does.
 func (c *Cluster) SetDBSize(name string, size, inUse int64) {
+	if size < 1 || inUse < 0 || inUse > size {
+		panic(fmt.Sprintf(
+			"etcdsim: SetDBSize(%q, %d, %d) needs 0 <= inUse <= size and size >= 1",
+			name, size, inUse,
+		))
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	m := c.mustMember(name)

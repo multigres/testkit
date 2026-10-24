@@ -568,6 +568,30 @@ func TestMoveLeaderRequiresTheLeaderEndpoint(t *testing.T) {
 	}
 }
 
+func TestSetDBSizePanicsOnInvalidSizes(t *testing.T) {
+	tests := map[string][2]int64{
+		"in use above size": {10, 20},
+		"negative in use":   {10, -1},
+		"zero size":         {0, 0},
+		"negative size":     {-5, -5},
+	}
+	for name, sizes := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := NewHealthy(1)
+			before := c.DBSize("etcd-0")
+			defer func() {
+				if recover() == nil {
+					t.Fatal("SetDBSize did not panic")
+				}
+				if got := c.DBSize("etcd-0"); got != before {
+					t.Fatalf("a refused SetDBSize changed the size: %d, want %d", got, before)
+				}
+			}()
+			c.SetDBSize("etcd-0", sizes[0], sizes[1])
+		})
+	}
+}
+
 func TestNewPanicsOnInvalidMembers(t *testing.T) {
 	ok := func(id uint64, name, ep string) Member {
 		return Member{ID: id, Name: name, Endpoint: ep, Healthy: true}
