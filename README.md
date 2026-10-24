@@ -163,7 +163,9 @@ test author's belief rather than its behaviour.
   copy and leaves `obj` untouched.
 - `RenameManager(ctx, c, obj, from, to)` renames the matching entries with one
   JSON patch guarded by the object's `resourceVersion`. A stale `obj` fails
-  the patch, and so does a `from` that matches nothing; re-read and retry.
+  the patch; re-read and retry on that. A `from` that matches nothing fails
+  with `errors.Is(err, managedfields.ErrNoMatch)`: no entry carries `from`, so
+  retrying never succeeds.
 
 It takes a `client.Client` and does not import `ctrltest`, so it works against
 any envtest, not only `ctrltest.Suite`.
@@ -193,7 +195,8 @@ A `Cluster` can reproduce:
 etcd requires. `DefragLog` and `MoveLeaderLog` record accepted calls. There is
 no raft, no quorum and no time.
 
-`etcdsim.Client` is a copy of the operator's unexported maintenance interface,
+`etcdsim.Client` is a copy of the operator's maintenance interface, exported as
+`EtcdMaintenanceClient` in its `toposerver` package,,
 so `Cluster.Client()` satisfies the operator's interface structurally and
 testkit never imports the operator. The consumer hands it to its reconciler
 through its own factory seam, with endpoints exactly as the reconciler will
