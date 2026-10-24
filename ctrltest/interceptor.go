@@ -260,13 +260,13 @@ func (i *Interceptor) Deactivate(ns string) {
 // API server afterwards. Pause(ns) followed by RequireQuiescent narrows that
 // window but does not close it. Retries refused while paused produce only
 // gated records and no writes, so the namespace goes quiet once the admitted
-// passes have written. Quiescence, though, sees watch events and the writes of
-// completed passes only; it keeps no count of passes still running. A pass
-// admitted just before Pause that stays silent for longer than the quiet window
-// and writes afterwards is not seen, and its write can land after
-// RequireQuiescent returned. A test can rely on this: nothing admitted after
-// Pause starts, and a pass that writes within the quiet window has finished. It
-// cannot rely on every earlier pass being finished.
+// passes have written. Quiescence sees watch events and each write once the API
+// server has answered it, from any pass, but keeps no count of passes still
+// running. A pass admitted just before Pause that stays silent for longer than
+// the quiet window can still write afterwards, after RequireQuiescent returned.
+// A test can rely on no request being admitted after Pause, and on every pass
+// still running when RequireQuiescent returns having gone at least the quiet
+// window without a write; not on every earlier pass being done.
 //
 // A pause ends with Activate or Deactivate for the namespace. Suite.Namespace
 // registers Deactivate as cleanup; a namespace no Suite.Namespace owns, such as

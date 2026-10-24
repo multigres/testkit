@@ -102,11 +102,13 @@ makes all of that assertable.
   wakes nothing; nudge the object with an edit the predicates admit. `Pause`
   does not wait for reconciles already admitted. `Pause(ns)` followed by
   `RequireQuiescent` narrows that window without closing it: quiescence
-  measures watch events and the writes of completed passes only, so a pass
-  admitted just before `Pause` that stays silent for longer than the quiet
-  window can still write afterwards. A test can rely on nothing new starting
-  after `Pause` and on any pass that writes within the quiet window having
-  finished, not on every earlier pass being done. A pause ends with `Activate`
+  sees watch events and each write once the API server has answered it, from
+  any pass, but keeps no count of passes still running. A pass admitted just
+  before `Pause` that stays silent for longer than the quiet window can still
+  write afterwards. A test can rely on no request being admitted after `Pause`
+  and on every pass still running when `RequireQuiescent` returns having gone
+  at least the quiet window without a write; not on every earlier pass being
+  done. A pause ends with `Activate`
   or `Deactivate`; `Suite.Namespace` registers `Deactivate` as cleanup, but a
   namespace it does not own (`""`, say) must be ended by the caller.
   `Paused(ns)` reports the state.
@@ -164,8 +166,8 @@ test author's belief rather than its behaviour.
 - `RenameManager(ctx, c, obj, from, to)` renames the matching entries with one
   JSON patch guarded by the object's `resourceVersion`. A stale `obj` fails
   the patch; re-read and retry on that. A `from` that matches nothing fails
-  with `errors.Is(err, managedfields.ErrNoMatch)`: no entry carries `from`, so
-  retrying never succeeds.
+  with `errors.Is(err, managedfields.ErrNoMatch)`: no entry in `obj` carries `from`;
+  retrying with the same object never succeeds.
 
 It takes a `client.Client` and does not import `ctrltest`, so it works against
 any envtest, not only `ctrltest.Suite`.
@@ -196,7 +198,7 @@ etcd requires. `DefragLog` and `MoveLeaderLog` record accepted calls. There is
 no raft, no quorum and no time.
 
 `etcdsim.Client` is a copy of the operator's maintenance interface, exported as
-`EtcdMaintenanceClient` in its `toposerver` package,,
+`EtcdMaintenanceClient` in its `toposerver` package,
 so `Cluster.Client()` satisfies the operator's interface structurally and
 testkit never imports the operator. The consumer hands it to its reconciler
 through its own factory seam, with endpoints exactly as the reconciler will

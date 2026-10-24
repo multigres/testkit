@@ -104,12 +104,13 @@
 // example) wakes nothing and needs a nudge the predicates admit.
 //
 // Pause does not wait for reconciles already admitted. Pause followed by
-// RequireQuiescent narrows that window without closing it: quiescence measures
-// watch events and the writes of completed passes only, so a pass admitted just
-// before Pause that stays silent for longer than the quiet window can still
-// write afterwards. A test can rely on nothing new starting after Pause and on
-// any pass that writes within the quiet window having finished, not on every
-// earlier pass being done.
+// RequireQuiescent narrows that window without closing it: quiescence sees
+// watch events and each write once the API server has answered it, from any
+// pass, but keeps no count of passes still running. A pass admitted just before
+// Pause that stays silent for longer than the quiet window can still write
+// afterwards. A test can rely on no request being admitted after Pause, and on
+// every pass still running when RequireQuiescent returns having gone at least
+// the quiet window without a write; not on every earlier pass being done.
 //
 // # The consumer owns the suite variable
 //
