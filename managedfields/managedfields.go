@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -17,6 +18,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 )
+
+// ErrNoMatch is wrapped by the error RenameManager returns when no
+// managedFields entry has the manager to rename. A caller sweeping objects that
+// do not all carry that manager tells "nothing to rename" from a stale
+// resourceVersion or an apiserver failure with errors.Is.
+var ErrNoMatch = errors.New("no managedFields entry has that manager")
 
 // Entry is one managedFields entry with its field set decoded.
 type Entry struct {
@@ -119,6 +126,13 @@ type seedConfig struct {
 type SeedOption func(*seedConfig)
 
 // OnStatus applies against the status subresource.
+//
+// Seed applies the whole object, so the status manager is recorded for every
+// path the apiserver keeps for that subresource, not only those under .status.
+// Observed on a Pod: .metadata.labels and the server-defaulted .status.phase
+// and .status.qosClass alongside the paths the test set. An assertion on a
+// seeded manager should therefore name a distinctive path, and a count of its
+// paths includes these.
 func OnStatus() SeedOption {
 	return func(c *seedConfig) { c.status = true }
 }
@@ -126,6 +140,8 @@ func OnStatus() SeedOption {
 // Seed server-side applies obj's current content under manager with
 // client.ForceOwnership, so the object gains an Apply entry for manager with
 // the field set obj carries. It applies a copy and leaves obj untouched.
+//
+// With OnStatus the field set recorded is wider than .status; see OnStatus.
 //
 // The server-populated identity fields (managedFields, resourceVersion, uid,
 // generation, creationTimestamp) are stripped from the applied copy: an apply
@@ -194,7 +210,12 @@ type jsonPatchOp struct {
 // patch rather than rename whatever now sits at those positions. The error is
 // returned and the caller re-reads and retries. It is also an error for no
 // entry to match, since a rename that renames nothing is a test that has
-// misremembered who owns the object.
+// misremembered who owns the object, and that error wraps ErrNoMatch.
+//
+// The patch response is written into obj, as client.Patch does, so obj holds
+// the renamed object afterwards and its resourceVersion is current for a
+// following call. A caller that wants the pre-rename object to compare against
+// must pass a DeepCopy.
 func RenameManager(ctx context.Context, c client.Client, obj client.Object, from, to string) error {
 	ops := []jsonPatchOp{
 		{Op: "test", Path: "/metadata/resourceVersion", Value: obj.GetResourceVersion()},
@@ -213,10 +234,11 @@ func RenameManager(ctx context.Context, c client.Client, obj client.Object, from
 	}
 	if matched == 0 {
 		return fmt.Errorf(
-			"rename manager %q to %q on %s: no managedFields entry has that manager (managers: %q)",
+			"rename manager %q to %q on %s: %w (managers: %q)",
 			from,
 			to,
 			describe(obj),
+			ErrNoMatch,
 			Managers(obj),
 		)
 	}

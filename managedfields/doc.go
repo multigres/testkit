@@ -10,6 +10,10 @@
 // recorded (Entries, Managers, Owners) and drives the server to record what a
 // test needs (Seed, RenameManager).
 //
+// Seed applies a whole object, so with OnStatus the seeded manager also claims
+// the metadata and server-defaulted status paths the apiserver keeps for that
+// subresource. Assertions on a seeded manager should name distinctive paths.
+//
 // It deliberately does not import ctrltest, so a consumer's package-level
 // envtests can use it without adopting the suite.
 package managedfields

@@ -3,8 +3,10 @@
 package managedfields_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -181,6 +183,31 @@ func TestEntriesSortingIsIndependentOfInputOrder(t *testing.T) {
 	}
 }
 
+// Two Update entries for one manager on different apiVersions tie on (manager,
+// subresource, operation) and differ only in paths, which is the case the
+// path-list tiebreak exists for.
+func TestEntriesTiedOnKeyAreOrderedByPaths(t *testing.T) {
+	mk := func(raw string) metav1.ManagedFieldsEntry {
+		return metav1.ManagedFieldsEntry{
+			Manager: "m", Operation: metav1.ManagedFieldsOperationUpdate,
+			FieldsType: "FieldsV1", FieldsV1: metav1.NewFieldsV1(raw),
+		}
+	}
+	x, y := mk(`{"f:spec":{"f:a":{}}}`), mk(`{"f:spec":{"f:b":{}}}`)
+	for name, in := range map[string][]metav1.ManagedFieldsEntry{
+		"xy": {x, y},
+		"yx": {y, x},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "x", ManagedFields: in}}
+			es := mustEntries(t, pod)
+			if len(es) != 2 || es[0].Paths[0] != ".spec.a" || es[1].Paths[0] != ".spec.b" {
+				t.Errorf("tied entries not ordered by paths: %+v", es)
+			}
+		})
+	}
+}
+
 func TestOwnersMatchesExactlyNotByPrefix(t *testing.T) {
 	obj := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "x", ManagedFields: []metav1.ManagedFieldsEntry{
@@ -276,6 +303,11 @@ func TestSeedOnStatusRecordsTheStatusSubresource(t *testing.T) {
 	if !slices.Contains(e.Paths, ".status.phase") {
 		t.Errorf("paths %q lack .status.phase", e.Paths)
 	}
+	// Documented on OnStatus: the whole object is applied, so the status
+	// manager also claims the metadata the apiserver keeps for the subresource.
+	if !slices.Contains(e.Paths, ".metadata.labels.a") {
+		t.Errorf("paths %q lack .metadata.labels.a, OnStatus doc is stale", e.Paths)
+	}
 }
 
 func TestRenameManagerRenamesOnlyMatchingEntries(t *testing.T) {
@@ -360,8 +392,12 @@ func TestRenameManagerOnAStaleObjectFailsAndChangesNothing(t *testing.T) {
 	}
 	before := mustEntries(t, live)
 
-	if err := managedfields.RenameManager(ctx, k8s, stale, "old", "new"); err == nil {
+	err := managedfields.RenameManager(ctx, k8s, stale, "old", "new")
+	if err == nil {
 		t.Fatal("RenameManager on a stale object returned nil")
+	}
+	if errors.Is(err, managedfields.ErrNoMatch) {
+		t.Errorf("a stale resourceVersion reported as ErrNoMatch: %v", err)
 	}
 	again := &corev1.Pod{}
 	if err := k8s.Get(ctx, client.ObjectKeyFromObject(pod), again); err != nil {
@@ -379,7 +415,16 @@ func TestRenameManagerWithNoMatchIsAnError(t *testing.T) {
 	if err := k8s.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	if err := managedfields.RenameManager(ctx, k8s, pod, "nobody", "new"); err == nil {
+	err := managedfields.RenameManager(ctx, k8s, pod, "nobody", "new")
+	if err == nil {
 		t.Fatal("renaming a manager that is not there returned nil")
+	}
+	if !errors.Is(err, managedfields.ErrNoMatch) {
+		t.Errorf("error %v does not wrap ErrNoMatch", err)
+	}
+	for _, w := range []string{"nobody", "new", "Pod", "/p"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error %q lacks %q", err, w)
+		}
 	}
 }
