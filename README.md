@@ -168,7 +168,8 @@ A `Cluster` can reproduce:
 
 - a missing member (`RemoveMember`) and a learner member (`Member.Learner`);
 - members that disagree on the leader (`SplitLeaderView`);
-- an etcd alarm (`SetAlarm`), reported as an error from `Status`;
+- an etcd alarm (`SetAlarm`), reported in `StatusResponse.Errors` with a nil
+  error from `Status`, as real etcd does;
 - an unhealthy member (`SetHealthy`), which fails `Health` and `Defragment`
   but not `Status`;
 - a leadership transfer that does not take effect (`StallLeaderMove`);
