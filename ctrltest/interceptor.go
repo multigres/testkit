@@ -54,6 +54,17 @@ const RequeueClamp = 50 * time.Millisecond
 // reconcilePollInterval is how often the reconcile-log waiters re-check.
 const reconcilePollInterval = 5 * time.Millisecond
 
+// PauseRetry is the requeue interval a paused namespace's refused reconciles
+// ask for. Not clamped or compressed: it is the gated path.
+//
+// A refused request for a merely inactive namespace returns an empty result,
+// so nothing ever brings it back and re-activating the namespace wakes no
+// controller until some object changes. A paused namespace is the opposite
+// promise: the suite intends to resume, so the controller's own queue keeps
+// the request alive and the first retry after Activate is admitted. 100ms is a
+// choice of latency against log churn, not a measurement.
+const PauseRetry = 100 * time.Millisecond
+
 // Reconcile is one pass through one controller's reconcile boundary: what was
 // asked of it, what it returned, how long it took, and which writes it made.
 //
@@ -153,19 +164,35 @@ type Interceptor struct {
 	gateMu sync.RWMutex
 	active map[string]struct{}
 
+	// paused holds the namespaces whose refused requests keep retrying.
+	paused map[string]struct{}
+
+	// gatedOnce holds the (controller, request) pairs already recorded as
+	// gated during the current pause of their namespace. Pause retries every
+	// PauseRetry, and logging each one would bury the log in identical
+	// entries for as long as the pause lasts. Guarded by gateMu.
+	gatedOnce map[gatedKey]struct{}
+
 	mu  sync.Mutex
 	seq map[string]int
 	log []Reconcile
+}
+
+type gatedKey struct {
+	controller string
+	req        reconcile.Request
 }
 
 // NewInterceptor returns an interceptor with no active namespaces, so nothing
 // reconciles until a test asks for a namespace. See Activate.
 func NewInterceptor(ops *Recorder, clamp time.Duration) *Interceptor {
 	i := &Interceptor{
-		ops:    ops,
-		clamp:  clamp,
-		active: map[string]struct{}{},
-		seq:    map[string]int{},
+		ops:       ops,
+		clamp:     clamp,
+		active:    map[string]struct{}{},
+		paused:    map[string]struct{}{},
+		gatedOnce: map[gatedKey]struct{}{},
+		seq:       map[string]int{},
 	}
 	if ops != nil {
 		ops.il = i
@@ -184,19 +211,94 @@ func NewInterceptor(ops *Recorder, clamp time.Duration) *Interceptor {
 // test's cluster would keep reconciling twenty times a second until the
 // process exits, spending CPU and burying the namespace under investigation in
 // another test's log lines.
+//
+// Activate also ends a Pause of ns. Requests the pause kept retrying are
+// admitted on their next retry, with no object write needed to wake them.
 func (i *Interceptor) Activate(ns string) {
 	i.gateMu.Lock()
 	defer i.gateMu.Unlock()
 	i.active[ns] = struct{}{}
+	i.clearPauseLocked(ns)
 }
 
 // Deactivate stops admitting reconciles for ns. A reconcile already running is
 // not interrupted: it holds no lock of ours and cancelling it would only make
 // teardown racy.
+//
+// It also clears a Pause of ns, so requests refused afterwards return an empty
+// result and the retry loop the pause was driving ends. Deactivate means the
+// suite is done with the namespace, and a retry loop that outlived that would
+// poll a namespace nobody intends to reopen.
 func (i *Interceptor) Deactivate(ns string) {
 	i.gateMu.Lock()
 	defer i.gateMu.Unlock()
 	delete(i.active, ns)
+	i.clearPauseLocked(ns)
+}
+
+// Pause stops admitting ns (Active(ns) becomes false, as after Deactivate) and
+// makes every request refused for ns return Result{RequeueAfter: PauseRetry}
+// so the controller's own queue retries it. Activate(ns) ends the pause and
+// the next retry is admitted. Deactivate(ns) also clears it.
+//
+// This exists for a test that must edit objects while no controller acts on
+// them and then have the controllers pick those objects up again. With plain
+// Deactivate the refused requests are dropped, and re-activating wakes nothing
+// until something else touches the objects.
+//
+// Each (controller, request) is recorded as a gated Reconcile once per pause,
+// not once per retry.
+func (i *Interceptor) Pause(ns string) {
+	i.gateMu.Lock()
+	defer i.gateMu.Unlock()
+	delete(i.active, ns)
+	i.clearPauseLocked(ns)
+	i.paused[ns] = struct{}{}
+}
+
+// Paused reports whether ns is paused.
+func (i *Interceptor) Paused(ns string) bool {
+	i.gateMu.RLock()
+	defer i.gateMu.RUnlock()
+	_, ok := i.paused[ns]
+	return ok
+}
+
+// clearPauseLocked drops ns's pause and its once-per-pause record, so a later
+// pause records its refused requests afresh. gateMu must be held for writing.
+func (i *Interceptor) clearPauseLocked(ns string) {
+	delete(i.paused, ns)
+	for k := range i.gatedOnce {
+		if k.req.Namespace == ns {
+			delete(i.gatedOnce, k)
+		}
+	}
+}
+
+// refuse decides what a refused request gets, and whether to record it.
+// admitted is true if ns became active between the caller's Active check and
+// this call, in which case the caller must run the delegate: answering from a
+// stale view would drop the wakeup that Activate is meant to deliver.
+//
+// The re-check and the once-set update share one critical section so that a
+// concurrent Activate or Deactivate cannot interleave between "is it paused"
+// and "have we recorded it".
+func (i *Interceptor) refuse(
+	controller string,
+	req reconcile.Request,
+) (res reconcile.Result, record, admitted bool) {
+	i.gateMu.Lock()
+	defer i.gateMu.Unlock()
+	if _, ok := i.active[req.Namespace]; ok {
+		return reconcile.Result{}, false, true
+	}
+	if _, ok := i.paused[req.Namespace]; !ok {
+		return reconcile.Result{}, true, false
+	}
+	k := gatedKey{controller: controller, req: req}
+	_, seen := i.gatedOnce[k]
+	i.gatedOnce[k] = struct{}{}
+	return reconcile.Result{RequeueAfter: PauseRetry}, !seen, false
 }
 
 // Active reports whether ns is admitted. A request whose namespace is empty,
@@ -238,15 +340,21 @@ func (in *intercepted) Reconcile(
 	req reconcile.Request,
 ) (reconcile.Result, error) {
 	if !in.ic.Active(req.Namespace) {
-		now := time.Now()
-		in.ic.append(Reconcile{
-			Controller: in.controller,
-			Request:    req,
-			Gated:      true,
-			Start:      now,
-			End:        now,
-		})
-		return reconcile.Result{}, nil
+		res, record, admitted := in.ic.refuse(in.controller, req)
+		if !admitted {
+			if record {
+				now := time.Now()
+				in.ic.append(Reconcile{
+					Controller: in.controller,
+					Request:    req,
+					Gated:      true,
+					Result:     res,
+					Start:      now,
+					End:        now,
+				})
+			}
+			return res, nil
+		}
 	}
 
 	rec := Reconcile{

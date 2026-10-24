@@ -371,3 +371,223 @@ func TestInterceptorWaitForRequeue(t *testing.T) {
 		t.Error("findRequeue matched a requeue by a different controller")
 	}
 }
+
+func gatedCount(ic *Interceptor, ns string) int {
+	n := 0
+	for _, r := range ic.InNamespace(ns) {
+		if r.Gated {
+			n++
+		}
+	}
+	return n
+}
+
+// driveQueue plays the part of a controller's work queue for one request: it
+// reconciles, and while the result asks for a requeue it waits that long and
+// reconciles again. It closes done when a reconcile returns no requeue.
+func driveQueue(
+	ctx context.Context,
+	r reconcile.Reconciler,
+	req reconcile.Request,
+) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			res, err := r.Reconcile(ctx, req)
+			if err != nil || res.RequeueAfter == 0 {
+				return
+			}
+			select {
+			case <-time.After(res.RequeueAfter):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func TestInterceptorPauseRefusesWithRetry(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	stub := &stubReconciler{}
+	ic := NewInterceptor(nil, RequeueClamp)
+	wrapped := ic.Wrap("shard", stub)
+
+	ic.Activate("ns1")
+	c.False(ic.Paused("ns1"), "Paused before Pause")
+	ic.Pause("ns1")
+	c.Require().True(ic.Paused("ns1"), "Paused after Pause")
+	c.False(ic.Active("ns1"), "Active(ns1) = true while paused")
+
+	res, err := wrapped.Reconcile(t.Context(), request("ns1", "a"))
+	c.Require().NoError(err, "Reconcile")
+	c.Eq(PauseRetry, res.RequeueAfter, "RequeueAfter while paused")
+	c.Eq(0, stub.called(), "the real reconciler ran while paused")
+}
+
+// TestInterceptorGateInactiveDoesNotRequeue pins the default: only an explicit
+// Pause asks the controller to come back.
+func TestInterceptorGateInactiveDoesNotRequeue(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	ic := NewInterceptor(nil, RequeueClamp)
+	wrapped := ic.Wrap("shard", &stubReconciler{})
+
+	res, err := wrapped.Reconcile(t.Context(), request("never", "a"))
+	c.Require().NoError(err, "Reconcile")
+	c.Eq(time.Duration(0), res.RequeueAfter, "RequeueAfter for a never-activated namespace")
+
+	ic.Activate("ns1")
+	ic.Deactivate("ns1")
+	res, err = wrapped.Reconcile(t.Context(), request("ns1", "a"))
+	c.Require().NoError(err, "Reconcile")
+	c.Eq(time.Duration(0), res.RequeueAfter, "RequeueAfter for a deactivated namespace")
+}
+
+func TestInterceptorPauseRecordsGatedOncePerPause(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	ic := NewInterceptor(nil, RequeueClamp)
+	shard := ic.Wrap("shard", &stubReconciler{})
+	cell := ic.Wrap("cell", &stubReconciler{})
+
+	ic.Pause("ns1")
+	for range 5 {
+		_, _ = shard.Reconcile(t.Context(), request("ns1", "a"))
+	}
+	c.Eq(1, gatedCount(ic, "ns1"), "gated entries after five retries of one request")
+
+	_, _ = shard.Reconcile(t.Context(), request("ns1", "b"))
+	_, _ = cell.Reconcile(t.Context(), request("ns1", "a"))
+	c.Eq(3, gatedCount(ic, "ns1"), "a new request and a new controller each record once")
+
+	// A second pause is a new episode and records again.
+	ic.Activate("ns1")
+	ic.Pause("ns1")
+	_, _ = shard.Reconcile(t.Context(), request("ns1", "a"))
+	_, _ = shard.Reconcile(t.Context(), request("ns1", "a"))
+	c.Eq(4, gatedCount(ic, "ns1"), "gated entries after a second pause")
+
+	// Deactivate clears the set too, and an unpaused refusal records every time.
+	ic.Deactivate("ns1")
+	ic.Pause("ns1")
+	_, _ = shard.Reconcile(t.Context(), request("ns1", "a"))
+	c.Eq(5, gatedCount(ic, "ns1"), "gated entries after pause, deactivate, pause")
+
+	ic.Deactivate("ns1")
+	_, _ = shard.Reconcile(t.Context(), request("ns1", "a"))
+	_, _ = shard.Reconcile(t.Context(), request("ns1", "a"))
+	c.Eq(7, gatedCount(ic, "ns1"), "an inactive namespace records every refusal")
+}
+
+// TestInterceptorGateActivateResumesPausedRequest is the liveness check: a
+// request refused during a pause must run after Activate with nobody writing
+// an object, and must then stop on its own.
+func TestInterceptorGateActivateResumesPausedRequest(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	stub := &stubReconciler{}
+	ic := NewInterceptor(nil, RequeueClamp)
+	wrapped := ic.Wrap("shard", stub)
+
+	ic.Pause("ns1")
+	done := driveQueue(t.Context(), wrapped, request("ns1", "a"))
+
+	time.Sleep(3 * PauseRetry)
+	c.Require().Eq(0, stub.called(), "the real reconciler ran while paused")
+	select {
+	case <-done:
+		t.Fatal("the retry loop ended while the namespace was still paused")
+	default:
+	}
+
+	ic.Activate("ns1")
+	c.False(ic.Paused("ns1"), "Paused after Activate")
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the paused request did not run within 5s of Activate")
+	}
+	c.Eq(1, stub.called(), "the real reconciler ran once after Activate")
+
+	time.Sleep(3 * PauseRetry)
+	c.Eq(1, stub.called(), "the real reconciler ran again with nothing to do")
+}
+
+func TestInterceptorPauseIsPerNamespace(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	stub := &stubReconciler{}
+	ic := NewInterceptor(nil, RequeueClamp)
+	wrapped := ic.Wrap("shard", stub)
+
+	ic.Activate("ns1")
+	ic.Activate("ns2")
+	ic.Pause("ns1")
+	c.True(ic.Active("ns2"), "Active(ns2) after Pause(ns1)")
+	c.False(ic.Paused("ns2"), "Paused(ns2) after Pause(ns1)")
+
+	res, err := wrapped.Reconcile(t.Context(), request("ns2", "a"))
+	c.Require().NoError(err, "Reconcile")
+	c.Eq(time.Duration(0), res.RequeueAfter, "RequeueAfter for the unpaused namespace")
+	c.Eq(1, stub.called(), "the real reconciler ran for the unpaused namespace")
+
+	// An inactive namespace next to a paused one stays quiet.
+	res, _ = wrapped.Reconcile(t.Context(), request("ns3", "a"))
+	c.Eq(time.Duration(0), res.RequeueAfter, "RequeueAfter for an inactive namespace")
+}
+
+func TestInterceptorDeactivateClearsPause(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	stub := &stubReconciler{}
+	ic := NewInterceptor(nil, RequeueClamp)
+	wrapped := ic.Wrap("shard", stub)
+
+	ic.Pause("ns1")
+	done := driveQueue(t.Context(), wrapped, request("ns1", "a"))
+	time.Sleep(2 * PauseRetry)
+
+	ic.Deactivate("ns1")
+	c.False(ic.Paused("ns1"), "Paused after Deactivate")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry loop did not end after Deactivate")
+	}
+	c.Eq(0, stub.called(), "the real reconciler ran after Deactivate")
+
+	res, err := wrapped.Reconcile(t.Context(), request("ns1", "a"))
+	c.Require().NoError(err, "Reconcile")
+	c.Eq(time.Duration(0), res.RequeueAfter, "RequeueAfter after Deactivate")
+}
+
+func TestInterceptorPauseConcurrent(t *testing.T) {
+	stub := &stubReconciler{}
+	ic := NewInterceptor(nil, RequeueClamp)
+	wrapped := ic.Wrap("shard", stub)
+
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range 200 {
+				switch n % 4 {
+				case 0:
+					ic.Pause("ns1")
+				case 1:
+					ic.Activate("ns1")
+				case 2:
+					ic.Deactivate("ns1")
+				}
+				_, _ = wrapped.Reconcile(t.Context(), request("ns1", fmt.Sprint(g)))
+				_ = ic.Paused("ns1")
+			}
+		}()
+	}
+	wg.Wait()
+}
