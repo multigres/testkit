@@ -2,7 +2,7 @@
 
 Go testing packages for the Multigres projects.
 
-Six packages, one module:
+Seven packages, one module:
 
 - **`assert`** is a typed assertion vocabulary for ordinary unit tests. No
   Kubernetes, no controller-runtime; stdlib and `go-cmp` only.
@@ -21,6 +21,9 @@ Six packages, one module:
   needs. See [below](#managedfields).
 - **`etcdsim`** is an in-memory multi-member etcd cluster for testing code that
   makes etcd maintenance calls. See [below](#etcdsim).
+- **`fakeapi`** builds controller-runtime fake clients that serve
+  `metadata.name` and `metadata.namespace` field selectors and maintain
+  `metadata.generation`. See [below](#fakeapi).
 
 They ship together because `ctrltest` hangs its own vocabulary on the same
 receiver `assert` provides, so a test says `c.Eq(...)` and `c.Get(key, obj)`
@@ -206,6 +209,45 @@ pass them (`NewHealthyAt`).
 
 It adds `go.etcd.io/etcd/api/v3` and `go.etcd.io/etcd/client/v3` to `go.mod`,
 which must stay at the versions the operator pins.
+
+## `fakeapi`
+
+controller-runtime's fake client refuses
+`client.MatchingFields{"metadata.name": n}` because no index is registered for
+it, and never sets or bumps `metadata.generation`.
+`fakeapi.NewClientBuilder(scheme)` returns the ordinary `*fake.ClientBuilder`
+with both fixed, so chain `WithObjects`, `WithStatusSubresource` and the rest as
+usual.
+
+- Every kind in the scheme with a `<Kind>List` when `NewClientBuilder` runs
+  gets `metadata.name` and `metadata.namespace` indexes (a kind the fake first
+  meets later, through an `Unstructured` of a kind the scheme lacks, gets none,
+  so register it in the scheme before building), and a `Watch` with those selectors delivers
+  only the matching objects' events (controller-runtime's fake ignores them).
+  Register any other field you also watch with `fakeapi.WithFieldIndex`, not
+  `WithIndex`: a `Watch` on a field fakeapi does not know is refused, as `List`
+  refuses a field with no index. An object that enters or leaves a `Watch`
+  selector on such a field arrives as `Added` or `Deleted`, as on a real server.
+- Generation is 1 on create, whatever the client sent (objects seeded with
+  `WithObjects` keep a non-zero generation they carry), and one higher after
+  each write that changes anything but `metadata` and `status`, through Update,
+  Patch and server-side Apply alike, and when a deletion with finalizers
+  begins. A generation the client sends is ignored, and a bump is part of the
+  one write, so a watcher sees one event.
+
+Where it knowingly differs from a real server: every kind gets a generation (a
+ConfigMap keeps 0 on a real one); a status change through the main Update on a
+kind registered without `WithStatusSubresource` does not bump (on a real CRD
+without the status subresource it does); field selectors are equality only;
+and, as in controller-runtime's fake, a `Watch` starts from now rather than from
+a `resourceVersion`, so a consumer that lists and then watches can miss a change
+made in between, including an object leaving its selector.
+
+It does not model defaulting, validation, admission or managed-fields
+fidelity; use `ctrltest` or envtest for those. Do not call `WithObjectTracker`,
+`WithTypeConverters` or `WithInterceptorFuncs` on the builder it returns (pass
+`fakeapi.WithInterceptors` to `NewClientBuilder` instead), and do not register
+`metadata.name` or `metadata.namespace` indexes again.
 
 ## Versioning
 
