@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +32,11 @@ func createFunc(
 		if err != nil {
 			return err
 		}
+		co := &client.CreateOptions{}
+		co.ApplyOptions(opts)
+		if len(co.DryRun) > 0 {
+			return nil
+		}
 		return writeBackGeneration(ctx, c, obj)
 	}
 }
@@ -48,10 +54,24 @@ func updateFunc(
 		if err != nil {
 			return err
 		}
+		uo := &client.UpdateOptions{}
+		uo.ApplyOptions(opts)
+		if len(uo.DryRun) > 0 {
+			return nil
+		}
 		return writeBackGeneration(ctx, c, obj)
 	}
 }
 
+// writeBackGeneration copies the stored generation onto obj. Callers skip it for
+// a dry-run write, which stores nothing and so leaves the caller's generation as
+// controller-runtime's fake leaves it; reading back would hand a dry-run Create
+// of a stored name that object's generation. It runs only after a write that
+// succeeded, so an object the read-back cannot find leaves nothing to copy
+// rather than an error: an Update that removes the last finalizer from an
+// object being deleted completes the deletion, and another writer may delete
+// the object in between. A real client reports neither as a failure of the
+// write.
 func writeBackGeneration(ctx context.Context, c client.WithWatch, obj client.Object) error {
 	switch obj.(type) {
 	case runtime.Unstructured, *metav1.PartialObjectMetadata:
@@ -64,6 +84,9 @@ func writeBackGeneration(ctx context.Context, c client.WithWatch, obj client.Obj
 	}
 	key := client.ObjectKeyFromObject(obj)
 	if err := c.Get(ctx, key, stored); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("read back the generation of %s: %w", key, err)
 	}
 	obj.SetGeneration(stored.GetGeneration())

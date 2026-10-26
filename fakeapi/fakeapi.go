@@ -49,9 +49,11 @@ func (r indexRegistry) add(gvk schema.GroupVersionKind, field string, fn client.
 
 // WithInterceptors installs f as the client's interceptors, alongside fakeapi's
 // own. Use it instead of calling WithInterceptorFuncs on the returned builder,
-// which holds a single Funcs value and so would replace fakeapi's Watch filter.
-// An f.Watch is called for every watch fakeapi accepts, and its result is what
-// the field selector filter wraps.
+// which holds a single Funcs value and so would replace fakeapi's Watch filter
+// and the Create and Update wrappers that copy the stored generation back onto
+// an Unstructured or PartialObjectMetadata. An f.Watch is called for every
+// watch fakeapi accepts, and its result is what the field selector filter
+// wraps; an f.Create or f.Update runs inside fakeapi's wrapper.
 func WithInterceptors(f interceptor.Funcs) Option {
 	return func(o *options) { o.interceptors = f }
 }
@@ -86,7 +88,8 @@ func WithFieldIndex(obj client.Object, field string, fn client.IndexerFunc) Opti
 // [WithFieldIndex], so use that rather than WithIndex for a field you also
 // watch. A selector on any other field is refused on Watch, as List refuses a
 // field with no index. Do not call WithInterceptorFuncs on the result, which
-// would replace the Watch filter; pass [WithInterceptors] instead.
+// would replace the Watch filter and the generation write-back; pass
+// [WithInterceptors] instead.
 //
 // Generation on create is 1 whatever the client sent; objects seeded with
 // WithObjects keep a non-zero generation they carry and get 1 only when it is 0.

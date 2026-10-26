@@ -19,7 +19,9 @@
 // field with no registered index. An object that enters or leaves the selector
 // because an indexed field changed is delivered as Added or Deleted, as a real
 // server does. Callers add their own interceptors with
-// [WithInterceptors] rather than WithInterceptorFuncs, which would replace it.
+// [WithInterceptors] rather than WithInterceptorFuncs, which would replace it
+// and the Create and Update wrappers that copy the stored generation back onto
+// an Unstructured or PartialObjectMetadata the caller holds.
 //
 // What is modelled is deliberately narrow. Generation is set to 1 on create,
 // whatever the client sent, except that objects seeded with WithObjects keep a

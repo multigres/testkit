@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -854,4 +855,66 @@ func TestWatchDeliversADeleteDuringItsSeedingList(t *testing.T) {
 	c.NoError(err)
 	defer wi.Stop()
 	c.Eq("a", nextWidget(t, wi, watch.Deleted).Name)
+}
+
+// TestWriteBackToleratesWritesThatStoreNothing covers the two successful writes
+// after which the object is not in the store: an Update that removes the last
+// finalizer from an object being deleted, and a dry-run Create. Reading the
+// generation back must not turn either into an error.
+func TestWriteBackToleratesWritesThatStoreNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := t.Context()
+	cl := newClient(t)
+	newThing := func(name string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(widgetGV.WithKind("Widget"))
+		u.SetName(name)
+		u.SetNamespace("ns")
+		return u
+	}
+
+	u := newThing("held")
+	u.SetFinalizers([]string{"example.test/hold"})
+	c.NoError(cl.Create(ctx, u))
+	c.NoError(cl.Delete(ctx, u))
+	c.NoError(cl.Get(ctx, key("held"), u))
+	u.SetFinalizers(nil)
+	c.NoError(cl.Update(ctx, u), "an Update that finalizes a deletion succeeds")
+	c.True(apierrors.IsNotFound(cl.Get(ctx, key("held"), newThing("held"))), "the object is gone")
+
+	dry := newThing("dry")
+	c.NoError(cl.Create(ctx, dry, client.DryRunAll), "a dry-run Create succeeds")
+	c.True(apierrors.IsNotFound(cl.Get(ctx, key("dry"), newThing("dry"))), "nothing was stored")
+}
+
+// TestDryRunWritesLeaveTheCallersGeneration pins that a dry-run write reports
+// what controller-runtime's fake reports: the generation the caller sent. The
+// fake neither refuses a dry-run Create of a stored name nor bumps on a
+// dry-run Update, so reading the stored object back would hand the caller
+// another object's generation in the first case and a stale one in the second.
+func TestDryRunWritesLeaveTheCallersGeneration(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := t.Context()
+	stored := widget("w")
+	stored.Generation = 5
+	cl := newClient(t, stored)
+	thing := func() *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(widgetGV.WithKind("Widget"))
+		u.SetName("w")
+		u.SetNamespace("ns")
+		return u
+	}
+
+	created := thing()
+	c.NoError(cl.Create(ctx, created, client.DryRunAll))
+	c.Eq(int64(0), created.GetGeneration(), "dry-run Create")
+
+	updated := thing()
+	c.NoError(cl.Get(ctx, key("w"), updated))
+	updated.SetGeneration(7)
+	c.NoError(unstructured.SetNestedField(updated.Object, "b", "spec", "image"))
+	c.NoError(cl.Update(ctx, updated, client.DryRunAll))
+	c.Eq(int64(7), updated.GetGeneration(), "dry-run Update")
+	c.Eq(int64(5), generationOf(t, cl, "w"))
 }

@@ -228,7 +228,10 @@ func (t *generationTracker) appliedGeneration(
 	if err := scratch.Apply(gvr, cfg.DeepCopyObject(), ns, dry); err != nil {
 		return 0, err
 	}
-	acc, _ := meta.Accessor(cfg)
+	acc, err := meta.Accessor(cfg)
+	if err != nil {
+		return 0, err
+	}
 	merged, err := scratch.Get(gvr, ns, acc.GetName(), metav1.GetOptions{})
 	if err != nil {
 		return 0, err

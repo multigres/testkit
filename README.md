@@ -245,7 +245,8 @@ made in between, including an object leaving its selector.
 
 It does not model defaulting, validation, admission or managed-fields
 fidelity; use `ctrltest` or envtest for those. Do not call `WithObjectTracker`,
-`WithTypeConverters` or `WithInterceptorFuncs` on the builder it returns (pass
+`WithTypeConverters` or `WithInterceptorFuncs` on the builder it returns (the
+last would drop the Watch filter and the generation write-back; pass
 `fakeapi.WithInterceptors` to `NewClientBuilder` instead), and do not register
 `metadata.name` or `metadata.namespace` indexes again.
 
